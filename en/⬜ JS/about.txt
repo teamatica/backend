@@ -1,0 +1,1 @@
+📌 Help in creating a JS version is welcome: a backend that is maximally ready for use is needed (ideally the same as in the PHP version, where during deployment it's enough to simply copy "/teamatica/index.php" to the website to start working), to free the system administrator from coding and tuning.
