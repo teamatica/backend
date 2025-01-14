@@ -18,4 +18,4 @@
 
 **`[uk]`** Вітається будь-яка допомога на всіх платформах та мовах
 
-**PHP** — зроблено за допомогою chatgpt.com та [claude.ai](https://claude.ai "claude.ai")
+**PHP** — зроблено за допомогою [chatgpt.com](https://chatgpt.com "chatgpt.com") та [claude.ai](https://claude.ai "claude.ai")
