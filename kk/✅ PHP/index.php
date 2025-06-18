@@ -1,7 +1,7 @@
 <?php //@teamatica │ 0.0.0.0 │ 23.12.2017 23:59:59 UTC+00:00
 
 $backPath = '' . DIRECTORY_SEPARATOR . 'backup' . DIRECTORY_SEPARATOR . date('Y') . DIRECTORY_SEPARATOR . date('m') . DIRECTORY_SEPARATOR . date('d') . DIRECTORY_SEPARATOR . date('H-i-s') . DIRECTORY_SEPARATOR; //сақтық көшірме каталогы
-$coreInfo = 1; //конфигурацияның ағымдағы нұсқасы
+$coreInfo = 2; //конфигурацияның ағымдағы нұсқасы
 $echoList = []; //барлық хабарламалар тізімі
 $fileBase = '.txt'; //дерекқор мұрағаты
 $fileInfo = '.txt'; //дерекқор нұсқасы
@@ -16,7 +16,11 @@ if (empty($_POST['keys'])) { //кілттердің бар-жоғын тексе
 		exit;
 
 	} else {
-		if ((password_verify($_SERVER['HTTP_USER_AGENT'], $operName)) && (password_verify($_POST['code'], $operCode))) { //оператор деректерін тексереміз
+		list($key0, $key1) = explode('§', $_POST['code']); //кілттер жиынтығын оқимыз
+
+		if ($coreInfo != $key0) exit('0'); //ағымдағы нұсқаны анықтаймыз
+
+		if ((password_verify($_SERVER['HTTP_USER_AGENT'], $operName)) && (password_verify($key1, $operCode))) { //оператор деректерін тексереміз
 
 			if (empty($_FILES)) { //файлдардың бар-жоғын тексереміз
 				exit('b1');
