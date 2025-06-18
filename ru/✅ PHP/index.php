@@ -1,7 +1,7 @@
 <?php //@teamatica │ 0.0.0.0 │ 23.12.2017 23:59:59 UTC+00:00
 
 $backPath = '' . DIRECTORY_SEPARATOR . 'backup' . DIRECTORY_SEPARATOR . date('Y') . DIRECTORY_SEPARATOR . date('m') . DIRECTORY_SEPARATOR . date('d') . DIRECTORY_SEPARATOR . date('H-i-s') . DIRECTORY_SEPARATOR; //каталог резервного копирования
-$coreInfo = 1; //текущая версия конфигурации
+$coreInfo = 2; //текущая версия конфигурации
 $echoList = []; //список всех сообщений
 $fileBase = '.txt'; //архив базы данных
 $fileInfo = '.txt'; //версия базы данных
@@ -16,7 +16,11 @@ if (empty($_POST['keys'])) { //проверяем наличие ключей
 		exit;
 
 	} else {
-		if ((password_verify($_SERVER['HTTP_USER_AGENT'], $operName)) && (password_verify($_POST['code'], $operCode))) { //проверяем данные оператора
+		list($key0, $key1) = explode('§', $_POST['code']); //считываем набор ключей
+
+		if ($coreInfo != $key0) exit('0'); //узнаём текущую версию
+
+		if ((password_verify($_SERVER['HTTP_USER_AGENT'], $operName)) && (password_verify($key1, $operCode))) { //проверяем данные оператора
 
 			if (empty($_FILES)) { //проверяем наличие файлов
 				exit('b1');
