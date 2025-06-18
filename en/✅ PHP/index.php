@@ -1,7 +1,7 @@
 <?php //@teamatica │ 0.0.0.0 │ 23.12.2017 23:59:59 UTC+00:00
 
 $backPath = '' . DIRECTORY_SEPARATOR . 'backup' . DIRECTORY_SEPARATOR . date('Y') . DIRECTORY_SEPARATOR . date('m') . DIRECTORY_SEPARATOR . date('d') . DIRECTORY_SEPARATOR . date('H-i-s') . DIRECTORY_SEPARATOR; //backup directory
-$coreInfo = 1; //current configuration version
+$coreInfo = 2; //current configuration version
 $echoList = []; //list of all messages
 $fileBase = '.txt'; //database archive
 $fileInfo = '.txt'; //database version
@@ -16,7 +16,11 @@ if (empty($_POST['keys'])) { //checking for keys
 		exit;
 
 	} else {
-		if ((password_verify($_SERVER['HTTP_USER_AGENT'], $operName)) && (password_verify($_POST['code'], $operCode))) { //checking operator data
+		list($key0, $key1) = explode('§', $_POST['code']); //reading key set
+
+		if ($coreInfo != $key0) exit('0'); //getting current version
+
+		if ((password_verify($_SERVER['HTTP_USER_AGENT'], $operName)) && (password_verify($key1, $operCode))) { //checking operator data
 
 			if (empty($_FILES)) { //checking for files
 				exit('b1');
