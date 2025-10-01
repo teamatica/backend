@@ -1,4 +1,4 @@
-<?php //@teamatica │ 0.0.0.0 │ 10.01.2025 23:59:59 UTC+00:00
+<?php //@teamatica │ 0.0.0.0 │ 01.10.2025 23:59:59 UTC+00:00
 
 declare(strict_types=1);
 
