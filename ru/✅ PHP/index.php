@@ -7,7 +7,7 @@ final class Initial {
 	public const O_PASS = '$2y$12$%%%%%';
 	public const S_BASE = 'https://teamatica.github.io/languages/';
 	public const S_FILE = 'file.json';
-	public const S_LIST = ['en', 'kk', 'ru', 'uk'];
+	public const S_LIST = ['ru'];
 	public const T_CORE = 2;
 	public const T_DAYS = 60;
 	public const T_NAME = 'Teamatica';
@@ -61,7 +61,7 @@ final class Request {
 	public function getPost(string $key, mixed $default = null): mixed {return $this->post[$key] ?? $default;}
 	public static function getHeader(string $key, ?string $default = null): ?string {return $_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $key))] ?? $default;}
 	public static function loadFrom(): self {return new self($_POST, $_FILES, $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');}
-	private function __construct(public readonly array $post, public readonly array $files, public readonly string $address) {}
+	private function __construct(public array $post, public array $files, public string $address) {}
 }
 
 class Alert extends Exception {public function __construct(string $message, int $code, public string $errorCode) {parent::__construct($message, $code);}}
@@ -74,7 +74,7 @@ class MFAService {
 		if (strlen($code) !== $digits || $period <= 0) return false;
 		try {
 			for ($i = -1; $i <= 1; $i++) if (hash_equals(self::generateCode($secret, ((int)floor(time() / $period)) + $i, $digits, $alphabet), $code)) return true;
-		} catch (\InvalidArgumentException $e) {
+		} catch (\InvalidArgumentException) {
 			return false;
 		}
 		return false;
@@ -114,7 +114,7 @@ class MFAService {
 		return $encoded . str_repeat('=', (8 - (strlen($encoded) % 8)) % 8);
 	}
 	private static function generateCode(string $secret, int $slice, int $digits, string $alphabet): string {
-		if ($digits < 6 || $digits > 10) throw new \InvalidArgumentException('Invalid code length');
+		if (!in_array($digits, [6, 10], true)) throw new \InvalidArgumentException('Invalid code length');
 		$high = match ($digits) {6 => 0, 10 => %%%%%};
 		$hmac = hash_hmac('sha1', pack('N', $high) . pack('N', $slice), self::base32Decode($secret, $alphabet), true);
 		return str_pad((string)((unpack('N', substr($hmac, ord($hmac[19]) & 0xf, 4))[1] & 0x7FFFFFFF) % (10 ** $digits)), $digits, '0', STR_PAD_LEFT);
@@ -168,16 +168,8 @@ class CodesService {
 		$this->saveToken($userLine, $token);
 		return $token;
 	}
-	public function getToken(string $userLine): ?string {
-		$stmt = $this->getDB()->prepare('SELECT token FROM codes WHERE user = ?');
-		$stmt->execute([$userLine]);
-		return $stmt->fetchColumn() ?: null;
-	}
-	public function isReady(string $userLine): bool {
-		$stmt = $this->getDB()->prepare('SELECT 1 FROM codes WHERE user = ?');
-		$stmt->execute([$userLine]);
-		return $stmt->fetchColumn() !== false;
-	}
+	public function getToken(string $userLine): ?string {return $this->queryUser($userLine) ?: null;}
+	public function isReady(string $userLine): bool {return $this->queryUser($userLine, '1') !== false;}
 	public function resetConnection(): void {$this->db = null;}
 	public function revokeToken(string $userLine): void {$this->getDB()->prepare('UPDATE codes SET token = NULL WHERE user = ?')->execute([$userLine]);}
 	public function setupSchema(PDO $connection): void {$connection->exec('CREATE TABLE IF NOT EXISTS codes (user TEXT PRIMARY KEY, token TEXT)');}
@@ -197,6 +189,12 @@ class CodesService {
 			$this->setupSchema($this->db);
 		}
 		return $this->db;
+	}
+	private function queryUser(string $userLine, string $column = 'token'): mixed {
+		$allowedColumn = match ($column) {'token', '1' => $column, default => throw new \InvalidArgumentException("Invalid column specified: {$column}")};
+		$stmt = $this->getDB()->prepare("SELECT {$allowedColumn} FROM codes WHERE user = ?");
+		$stmt->execute([$userLine]);
+		return $stmt->fetchColumn();
 	}
 	private function saveToken(string $userLine, string $token): void {$this->getDB()->prepare('INSERT INTO codes (user, token) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET token = excluded.token')->execute([$userLine, hash('sha256', $token)]);}
 }
@@ -220,20 +218,14 @@ class LangsService {
 		$results = [];
 		foreach ($filenames as $filename) {
 			$curlInit = curl_init(Initial::S_BASE . $filename);
-			if ($curlInit === false) {
+			if (!$curlInit) {
 				$results[$filename] = null;
 				continue;
 			}
-		curl_setopt_array($curlInit, [CURLOPT_FAILONERROR => false, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 3, CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_TIMEOUT => 10, CURLOPT_USERAGENT => Initial::T_NAME]);
-		$content = curl_exec($curlInit);
-		$httpCode = curl_getinfo($curlInit, CURLINFO_HTTP_CODE);
-		if ($httpCode === 200 && $content !== false) {
-			$results[$filename] = $content;
-		} else {
-			$results[$filename] = null;
-			error_log(Initial::T_NAME . ' | ❗ | Not found: ' . Initial::S_BASE . $filename);
-		}
-		curl_close($curlInit);
+			curl_setopt_array($curlInit, [CURLOPT_FAILONERROR => false, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 3, CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_TIMEOUT => 10, CURLOPT_USERAGENT => Initial::T_NAME]);
+			$content = curl_exec($curlInit);
+			$results[$filename] = match (curl_getinfo($curlInit, CURLINFO_HTTP_CODE) === 200 && $content !== false) {true => $content, false => error_log(Initial::T_NAME . ' | ❗ | Not found: ' . Initial::S_BASE . $filename) ? null : null};
+			curl_close($curlInit);
 		}
 		return $results;
 	}
@@ -310,7 +302,7 @@ class LangsService {
 class UsersService {
 	private ?string $cachedSecret = null;
 	public function __construct(private Initial $initial, private SQLService $sqlService) {}
-	public function createBase(string $newBase, array $sourceFiles): void {$this->buildDatabase($newBase, $this->extractData($sourceFiles));}
+	public function createBase(string $newBase, array $sourceFiles, string $version, string $secret): void {$this->buildDatabase($newBase, $this->extractData($sourceFiles, $version, $secret));}
 	public function getHash(int $row): ?string {
 		if ($row <= 0 || !is_readable($this->initial->uList())) return null;
 		$stmt = $this->getConnection($this->initial->uList(), true)->prepare('SELECT bcrypt FROM list WHERE rowid = ?');
@@ -347,34 +339,28 @@ class UsersService {
 			throw new Alert('Failed to build new user database', 500, 'x9');
 		}
 	}
-	private function extractData(array $sourceFiles): array {
-		$hashListContent = $sourceFiles['hashList.txt']['content'] ?? null;
-		if ($hashListContent === null) throw new Alert('File hashList.txt is missing or not readable', 500, 'x3');
+	private function extractData(array $sourceFiles, string $version, string $secret): array {
+		$hashListContent = $sourceFiles['hashList.txt']['content'] ?? throw new Alert('File hashList.txt is missing or not readable', 500, 'x3');
 		$hashes = array_map(function(string $line) {
 			$hash = trim($line);
 			if ($hash === '') return null;
 			if (password_get_info($hash)['algoName'] !== 'bcrypt') throw new Alert('Invalid data format in hashList.txt', 400, 'x4');
 			return $hash;
 		}, explode("\n", $hashListContent));
-		$fileInfoContent = $sourceFiles['fileInfo.txt']['content'] ?? null;
-		if ($fileInfoContent === null) throw new Alert('File fileInfo.txt is missing or not readable', 500, 'x5');
-		$version = trim($fileInfoContent);
-		if (!ctype_digit($version)) throw new Alert('Invalid data format in fileInfo.txt', 400, 'x6');
-		$linkHeadContent = $sourceFiles['linkHead.txt']['content'] ?? null;
-		if ($linkHeadContent === null) throw new Alert('File linkHead.txt is missing or not readable', 500, 'x7');
-		$secret = trim(strtoupper(str_replace('=', '', $linkHeadContent)));
-		if ((empty($secret) || preg_match('/[^' . MFAService::ABC . ']/', $secret) || strlen($secret) !== 32)) throw new Alert('Invalid data format in linkHead.txt', 400, 'x8');
-		return ['hashes' => $hashes, 'version' => (int)$version, 'secret' => $secret];
+		if (!ctype_digit($version)) throw new Alert('Invalid data format in version field', 400, 'x6');
+		$cleanSecret = trim(strtoupper($secret));
+		if (strlen($cleanSecret) !== 32 || preg_match('/[^' . MFAService::ABC . ']/', $cleanSecret)) throw new Alert('Invalid data format in secret field', 400, 'x8');
+		return ['hashes' => $hashes, 'version' => (int)$version, 'secret' => $cleanSecret];
 	}
 	private function getConnection(string $dbPath): PDO {return $this->sqlService->getConnection($dbPath);}
 }
 
 class UtilsService {
 	public function __construct(private Initial $initial, private SQLService $sqlService, private CodesService $codesService, private UsersService $usersService) {}
-	public function processUpload(Request $request): void {
+	public function processUpload(Request $request, string $version, string $secret): void {
 		$tempPath = dirname($this->initial->rData()) . DIRECTORY_SEPARATOR . bin2hex(random_bytes(12));
 		try {
-			$newFolder = $this->prepareUpdate($request, $tempPath);
+			$newFolder = $this->prepareUpdate($request, $tempPath, $version, $secret);
 			if (file_exists($this->initial->uCase())) {
 				$this->performUpdate($newFolder, $tempPath);
 			} else {
@@ -414,47 +400,60 @@ class UtilsService {
 		if (!rename($newFolder, $this->initial->rData())) throw new Alert('Failed to activate initial version', 500, 'b0');
 	}
 	private function performUpdate(string $newFolder, string $tempPath): void {
-		$backupPath = null;
-		$this->sqlService->closeConnection($this->initial->uList());
-		$this->sqlService->closeConnection($this->initial->uTemp());
-		$this->codesService->resetConnection();
-		$mfaTemp = $tempPath . DIRECTORY_SEPARATOR . basename($this->initial->uTemp());
-		if (file_exists($this->initial->uTemp())) {
-			if (!rename($this->initial->uTemp(), $mfaTemp)) throw new Alert('Failed to secure MFA state', 500, 'b0');
+		$lockFile = $this->initial->fBase() . DIRECTORY_SEPARATOR . 'update.lock';
+		if (file_exists($lockFile) && (time() - filemtime($lockFile)) > 5) unlink($lockFile);
+		$lock = fopen($lockFile, 'c');
+		if (!$lock || !flock($lock, LOCK_EX | LOCK_NB)) {
+			if ($lock) fclose($lock);
+			throw new Alert('Another update process is already running', 409, 'b0');
 		}
-		$backupPath = str_replace('/', DIRECTORY_SEPARATOR, $this->initial->rCopy() . '/' . date('Y/m/d/H-i-s/') . basename($this->initial->rData()));
-		if (!is_dir(dirname($backupPath))) mkdir(dirname($backupPath), 0700, true);
-		if (!rename($this->initial->rData(), $backupPath)) {
-			if (isset($mfaTemp) && file_exists($mfaTemp)) rename($mfaTemp, $this->initial->uTemp());
-			throw new Alert('Failed to backup current data', 500, 'b5');
-		}
-		$mfaPath = $backupPath . DIRECTORY_SEPARATOR . basename($this->initial->uTemp());
-		$this->codesService->setupSchema($this->sqlService->getConnection($mfaPath));
-		$this->sqlService->closeConnection($mfaPath);
-		chmod($mfaPath, 0600);
-		if (!rename($newFolder, $this->initial->rData())) {
-			if ($backupPath && is_dir($backupPath)) rename($backupPath, $this->initial->rData());
-			if (isset($mfaTemp) && file_exists($mfaTemp)) rename($mfaTemp, $this->initial->uTemp());
-			throw new Alert('Failed to activate new version', 500, 'b6');
-		}
-		if (isset($mfaTemp) && file_exists($mfaTemp)) {
-			if (!rename($mfaTemp, $this->initial->uTemp())) {
-				if ($backupPath && is_dir($backupPath)) rename($backupPath, $this->initial->rData());
-				throw new Alert('Failed to restore MFA state', 500, 'b0');
+		try {
+			$backupPath = null;
+			$this->sqlService->closeConnection($this->initial->uList());
+			$this->sqlService->closeConnection($this->initial->uTemp());
+			$this->codesService->resetConnection();
+			$mfaTemp = $tempPath . DIRECTORY_SEPARATOR . basename($this->initial->uTemp());
+			if (file_exists($this->initial->uTemp())) {
+				if (!rename($this->initial->uTemp(), $mfaTemp)) throw new Alert('Failed to secure MFA state', 500, 'b0');
 			}
+			$backupPath = str_replace('/', DIRECTORY_SEPARATOR, $this->initial->rCopy() . '/' . date('Y/m/d/H-i-s/') . basename($this->initial->rData()));
+			if (!is_dir(dirname($backupPath))) mkdir(dirname($backupPath), 0700, true);
+			if (!rename($this->initial->rData(), $backupPath)) {
+				if (isset($mfaTemp) && file_exists($mfaTemp)) rename($mfaTemp, $this->initial->uTemp());
+				throw new Alert('Failed to backup current data', 500, 'b5');
+			}
+			$mfaPath = $backupPath . DIRECTORY_SEPARATOR . basename($this->initial->uTemp());
+			$this->codesService->setupSchema($this->sqlService->getConnection($mfaPath));
+			$this->sqlService->closeConnection($mfaPath);
+			if (!chmod($mfaPath, 0600)) error_log(Initial::T_NAME . ' | ❗ | Failed to set secure permissions on backup MFA file: ' . $mfaPath);
+			if (!rename($newFolder, $this->initial->rData())) {
+				if ($backupPath && is_dir($backupPath)) rename($backupPath, $this->initial->rData());
+				if (isset($mfaTemp) && file_exists($mfaTemp)) rename($mfaTemp, $this->initial->uTemp());
+				throw new Alert('Failed to activate new version', 500, 'b6');
+			}
+			if (isset($mfaTemp) && file_exists($mfaTemp)) {
+				if (!rename($mfaTemp, $this->initial->uTemp())) {
+					if ($backupPath && is_dir($backupPath)) rename($backupPath, $this->initial->rData());
+					throw new Alert('Failed to restore MFA state', 500, 'b0');
+				}
+			}
+		} finally {
+			flock($lock, LOCK_UN);
+			fclose($lock);
+			if (file_exists($lockFile)) unlink($lockFile);
 		}
 	}
-	private function prepareUpdate(Request $request, string $tempPath): string {
+	private function prepareUpdate(Request $request, string $tempPath, string $version, string $secret): string {
 		$uploaded = $this->validateFiles($request, $tempPath);
 		$this->checkTokens($uploaded);
 		$newFolder = $tempPath . DIRECTORY_SEPARATOR . 'new';
 		if (!mkdir($newFolder, 0700, true)) throw new Alert('Cannot create new folder', 500, 'b4');
 		$tempSQL = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uList());
-		$this->usersService->createBase($tempSQL, $uploaded);
-		chmod($tempSQL, 0600);
+		$this->usersService->createBase($tempSQL, $uploaded, $version, $secret);
+		if (!chmod($tempSQL, 0600)) throw new Alert('Cannot create new SQL', 500, 'b4');
 		$tempZIP = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uCase());
 		if (!rename($uploaded['fileBase.zip']['path'], $tempZIP)) throw new Alert('Failed to promote ZIP file', 500, 'b6');
-		chmod($tempZIP, 0600);
+		if (!chmod($tempZIP, 0600)) throw new Alert('Cannot create new ZIP', 500, 'b4');
 		return $newFolder;
 	}
 	private function pruneBackups(): void {
@@ -483,16 +482,16 @@ class UtilsService {
 		$tempDir = $tempPath . DIRECTORY_SEPARATOR . 'temp';
 		Manager::createDirectory($tempDir);
 		$files = $request->files['file'] ?? null;
-		if (!is_array($files) || !isset($files['name']) || count($files['name']) !== 4) throw new Alert('Invalid data format', 400, 'b7');
+		if (!is_array($files) || !isset($files['name']) || count($files['name']) !== 2) throw new Alert('Invalid data format', 400, 'b7');
 		if (disk_free_space(dirname($tempPath)) < (Initial::T_SIZE * 100)) throw new Alert('Not enough disk space', 507, 'b9');
 		$validated = [];
-		for ($i = 0; $i < 4; $i++) {
+		for ($i = 0; $i < 2; $i++) {
 			$filename = self::filterFile($files['name'][$i]);
 			if ($files['error'][$i] !== UPLOAD_ERR_OK) throw new Alert("Upload error: {$files['error'][$i]}", 500, 'b6');
 			if ($files['size'][$i] > Initial::T_SIZE) throw new Alert('File too large', 413, 'b3');
 			$file = $tempDir . DIRECTORY_SEPARATOR . $filename;
 			$tempFile = $files['tmp_name'][$i];
-			if (!is_uploaded_file($tempFile) || !move_uploaded_file($tempFile, $file)) throw new Alert('Invalid temp file', 500, 'b6');
+			if (!move_uploaded_file($tempFile, $file)) throw new Alert('Invalid temp file', 500, 'b6');
 			if (!is_readable($file)) throw new Alert('Cannot read temp file', 500, 'b1');
 			if ($filename === 'fileBase.zip') {
 				if (!str_starts_with(file_get_contents($file, false, null, 0, 4), "PK\x03\x04")) throw new Alert('Invalid ZIP', 415, 'b2');
@@ -507,7 +506,7 @@ class UtilsService {
 	}
 	private static function filterFile(string $filename): string {
 		$name = basename($filename);
-		if (!in_array($name, ['fileBase.zip', 'fileInfo.txt', 'hashList.txt', 'linkHead.txt'], true)) throw new Alert('Invalid new file: ' . $name, 400, 'b2');
+		if (!in_array($name, ['fileBase.zip', 'hashList.txt'], true)) throw new Alert('Invalid new file: ' . $name, 400, 'b2');
 		return $name;
 	}
 }
@@ -516,6 +515,10 @@ final class Application {
 	private ?string $signatureKey = null;
 	public function __construct(private Initial $initial, private Request $request, private CodesService $codesService, private LangsService $langsService, private UsersService $usersService, private UtilsService $utilsService) {}
 	public function run(): void {
+		header_remove('X-Powered-By');
+		header("Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; form-action 'none'");
+		header('Cross-Origin-Resource-Policy: same-origin');
+		header('Strict-Transport-Security: max-age=3600');
 		if ($_SERVER['REQUEST_METHOD'] === 'GET' && !isset($_GET['status'])) {
 			header('Location: /', true, 302);
 			exit();
@@ -609,6 +612,9 @@ final class Application {
 		$payload = $this->validatePayload($rawPayload);
 		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
 		$user = $this->authenticateRequest($payload);
+		$version = $payload['v'] ?? null;
+		$secret = $payload['l'] ?? null;
+		if ($version === null || $secret === null) throw new Alert('Missing required data fields', 400, 'v6');
 		if (!$this->isFirst() && (is_dir($this->initial->rData()) || !file_exists($this->initial->uCase()))) {
 			$mfaResult = $this->processMFA('0', Initial::O_PASS, $payload['t'] ?? null, (string)($payload['i'] ?? ''), (string)($payload['p'] ?? ''), $payload['h'] ?? null);
 			if (isset($mfaResult['o'])) {
@@ -619,7 +625,7 @@ final class Application {
 			if ($newToken) header(Initial::T_NAME . ':' . $newToken);
 		}
 		if (isset($newToken) && $newToken) $this->logAction('🔐', "ID #{$user['userID']}: token renewed");
-		$this->utilsService->processUpload($this->request);
+		$this->utilsService->processUpload($this->request, (string)$version, (string)$secret);
 		$this->langsService->checkUpdate();
 		$this->logAction('☑️', "ID #{$user['userID']}: upload received");
 		$this->sendInfo('a', 201);
@@ -684,9 +690,7 @@ final class Application {
 	private static function getSize(string $value): int {
 		$value = trim($value);
 		if (!preg_match('/^(\d+)\s*([kmgtp]?)/i', $value, $matches)) return (int)$value;
-		$number = (int)$matches[1];
-		$unit = $matches[2] ? strtolower($matches[2]) : '';
-		return match ($unit) {'p' => $number * 1024 * 1024 * 1024 * 1024 * 1024, 't' => $number * 1024 * 1024 * 1024 * 1024, 'g' => $number * 1024 * 1024 * 1024, 'm' => $number * 1024 * 1024, 'k' => $number * 1024, default => $number};
+		return (int)$matches[1] * (1024 ** (['k' => 1, 'm' => 2, 'g' => 3, 't' => 4, 'p' => 5][strtolower($matches[2] ?? '')] ?? 0));
 	}
 }
 
