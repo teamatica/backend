@@ -1,4 +1,4 @@
-<?php //@teamatica │ 0.0.0.0 │ 01.10.2025 23:59:59 UTC+00:00
+<?php //@teamatica │ 0.0.0.0 │ 2025-10-01 23:59:59 UTC+00:00
 
 declare(strict_types=1);
 
@@ -58,7 +58,7 @@ final class Manager {
 }
 
 final class Request {
-	public function getPost(string $key, mixed $default = null): mixed {return $this->post[$key] ?? $default;}
+	public function getPost(string $key, string|array|null $default = null): string|array|null {return $this->post[$key] ?? $default;}
 	public static function getHeader(string $key, ?string $default = null): ?string {return $_SERVER['HTTP_' . strtoupper(str_replace('-', '_', $key))] ?? $default;}
 	public static function loadFrom(): self {return new self($_POST, $_FILES, $_SERVER['REMOTE_ADDR'] ?? '0.0.0.0');}
 	private function __construct(public array $post, public array $files, public string $address) {}
@@ -157,8 +157,7 @@ class CodesService {
 			$db->exec('DELETE FROM codes');
 			return;
 		}
-		$activeHashes = array_map(fn($id) => hash('sha256', (string)$id), $activeHashes);
-		$db->prepare('DELETE FROM codes WHERE user NOT IN (' . implode(',', array_fill(0, count($activeHashes), '?')). ')')->execute($activeHashes);
+		$db->prepare('DELETE FROM codes WHERE user NOT IN (SELECT value FROM json_each(?))')->execute([json_encode(array_map(fn($id) => hash('sha256', (string)$id), $activeHashes))]);
 	}
 	public function createToken(string $userID, string $userLine, string $userHash, string $userKey): string {
 		$nonce = random_bytes(12);
@@ -190,7 +189,7 @@ class CodesService {
 		}
 		return $this->db;
 	}
-	private function queryUser(string $userLine, string $column = 'token'): mixed {
+	private function queryUser(string $userLine, string $column = 'token'): string|false|null {
 		$allowedColumn = match ($column) {'token', '1' => $column, default => throw new \InvalidArgumentException("Invalid column specified: {$column}")};
 		$stmt = $this->getDB()->prepare("SELECT {$allowedColumn} FROM codes WHERE user = ?");
 		$stmt->execute([$userLine]);
@@ -327,8 +326,7 @@ class UsersService {
 			$db->exec('CREATE TABLE list (bcrypt TEXT)');
 			$db->exec('CREATE TABLE version (number INTEGER NOT NULL)');
 			$db->exec('CREATE TABLE secret (totp TEXT NOT NULL)');
-			$hashes = $db->prepare('INSERT INTO list (bcrypt) VALUES (?)');
-			foreach ($data['hashes'] as $hash) $hashes->execute([$hash]);
+			if (!empty($data['hashes'])) $db->prepare('INSERT INTO list (bcrypt) SELECT value FROM json_each(?)')->execute([json_encode($data['hashes'])]);
 			$db->prepare('INSERT INTO version (number) VALUES (?)')->execute([$data['version']]);
 			$db->prepare('INSERT INTO secret (totp) VALUES (?)')->execute([$data['secret']]);
 			$db->commit();
@@ -579,9 +577,13 @@ final class Application {
 			return $secret === null ? null : hash('sha256', gmdate('Y-m-d') . $secret, true);
 		})();
 	}
+	private function getPayload(string $postKey): array {
+		$payload = $this->request->getPost($postKey);
+		if (!is_string($payload) || $payload === '') throw new Alert('Invalid payload', 400, 'v1');
+		return ['raw' => $payload, 'decoded' => $this->validatePayload($payload)];
+	}
 	private function handleUpdate(): void {
-		$rawPayload = (string)$this->request->getPost('update');
-		$payload = $this->validatePayload($rawPayload);
+		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('update');
 		if (empty($payload['p'])) {
 			$this->sendInfo((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . (file_exists($this->initial->uCase()) ? '1' : '0') . (!$this->isFirst() ? '1' : '0'));
 			return;
@@ -607,9 +609,8 @@ final class Application {
 	}
 	private function handleUpload(): void {
 		if (Initial::T_DAYS < 6) throw new Alert('Invalid backup retention period', 500, 'b8');
-		$rawPayload = (string)$this->request->getPost('upload');
+		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('upload');
 		Manager::initialize($this->initial);
-		$payload = $this->validatePayload($rawPayload);
 		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
 		$user = $this->authenticateRequest($payload);
 		$version = $payload['v'] ?? null;
@@ -651,8 +652,7 @@ final class Application {
 		return ['token' => $this->codesService->createToken($userID, $userLine, $passwordHash, $userKey)];
 	}
 	private function sendError(string $errorCode, int $httpCode, ?string $message = null): void {
-		$icon = ($errorCode === 'q2') ? '🔒' : (($httpCode >= 500) ? '⛔' : '🚫');
-		$this->logAction($icon, ($message ?? $errorCode) . " ({$errorCode})");
+		$this->logAction(($errorCode === 'q2') ? '🔒' : (($httpCode >= 500) ? '⛔' : '🚫'), ($message ?? $errorCode) . " ({$errorCode})");
 		$this->sendInfo($errorCode, $httpCode);
 		exit();
 	}
@@ -666,8 +666,8 @@ final class Application {
 		if ($signatureKey !== null) header('X-Signature:' . base64_encode(hash_hmac('sha256', $responseBody, $signatureKey, true)));
 		echo $responseBody;
 	}
-	private function validatePayload(?string $rawPayload): array {
-		if ($rawPayload === null || strlen($rawPayload) > 600) throw new Alert('Invalid JSON', 400, 'v1');
+	private function validatePayload(string $rawPayload): array {
+		if (strlen($rawPayload) > 600) throw new Alert('Invalid JSON', 400, 'v1');
 		$payload = json_decode($rawPayload, true);
 		if (!is_array($payload)) throw new Alert('Payload is not JSON', 400, 'v2');
 		$userID = $payload['i'] ?? '-1';
