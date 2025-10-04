@@ -189,7 +189,7 @@ class CodesService {
 		}
 		return $this->db;
 	}
-	private function queryUser(string $userLine, string $column = 'token'): string|false|null {
+	private function queryUser(string $userLine, string $column = 'token'): string|int|false|null {
 		$allowedColumn = match ($column) {'token', '1' => $column, default => throw new \InvalidArgumentException("Invalid column specified: {$column}")};
 		$stmt = $this->getDB()->prepare("SELECT {$allowedColumn} FROM codes WHERE user = ?");
 		$stmt->execute([$userLine]);
