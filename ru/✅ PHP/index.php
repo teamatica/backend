@@ -27,7 +27,7 @@ final readonly class Initial {
 	public function uTemp(): string {return $this->rData . DIRECTORY_SEPARATOR . self::T_NAME . '.mfa';}
 }
 
-final readonly class Memento {public function __construct(public ?int $version, public ?string $secret, public bool $caseExists) {}}
+final readonly class Memento {public function __construct(public ?string $alphabet, public ?int $offset, public ?string $secret, public ?int $version, public bool $exist) {}}
 
 final readonly class Request {
 	public function getPost(string $key, string|array|null $default = null): string|array|null {return $this->post[$key] ?? $default;}
@@ -60,13 +60,12 @@ class Alert extends Exception {public function __construct(string $message, int 
 
 class MFAService {
 	public const ABC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
-	public const XYZ = '%%%%%';
 	public static function generateSecret(#[SensitiveParameter] string $hash, string $alphabet): string {return self::base32Encode(substr(hash('sha256', $hash, true), 0, 20), $alphabet);}
-	public static function verifyCode(#[SensitiveParameter] string $secret, #[SensitiveParameter] string $code, int $digits, int $period, string $alphabet): bool {
+	public static function verifyCode(#[SensitiveParameter] string $secret, #[SensitiveParameter] string $code, int $digits, int $period, string $alphabet, int $offset): bool {
 		if (strlen($code) !== $digits || $period <= 0) return false;
 		try {
 			$slice = (int)floor(time() / $period);
-			return array_reduce([-1, 0, 1], fn($found, $offset) => $found || hash_equals(self::generateCode($secret, $slice + $offset, $digits, $alphabet), $code), false);
+			return array_reduce([-1, 0, 1], fn($found, $i) => $found || hash_equals(self::generateCode($secret, $slice + $i, $digits, $alphabet, $offset), $code), false);
 		} catch (\InvalidArgumentException) {
 			return false;
 		}
@@ -100,8 +99,8 @@ class MFAService {
 		if ($acc['length'] > 0) $acc['encoded'] .= $alphabet[($acc['bits'] << (5 - $acc['length'])) & 31];
 		return $acc['encoded'] . str_repeat('=', (8 - (strlen($acc['encoded']) % 8)) % 8);
 	}
-	private static function generateCode(string $secret, int $slice, int $digits, string $alphabet): string {
-		$hmac = hash_hmac('sha1', pack('N', match ($digits) {6 => 0, 10 => %%%%%, default => throw new \InvalidArgumentException('Invalid code length')}) . pack('N', $slice), self::base32Decode($secret, $alphabet), true);
+	private static function generateCode(string $secret, int $slice, int $digits, string $alphabet, int $offset): string {
+		$hmac = hash_hmac('sha1', pack('N', match ($digits) {6 => 0, 10 => $offset, default => throw new \InvalidArgumentException('Invalid code length')}) . pack('N', $slice), self::base32Decode($secret, $alphabet), true);
 		return str_pad((string)((unpack('N', substr($hmac, ord($hmac[19]) & 0xf, 4))[1] & 0x7FFFFFFF) % (10 ** $digits)), $digits, '0', STR_PAD_LEFT);
 	}
 }
@@ -135,10 +134,10 @@ class CodesService {
 	public function cleanupTokens(array $activeHashes): void {
 		$db = $this->getDB();
 		if (empty($activeHashes)) {
-			$db->exec('DELETE FROM codes');
+			$db->exec('DELETE FROM list');
 			return;
 		}
-		$db->prepare('DELETE FROM codes WHERE user NOT IN (SELECT value FROM json_each(?))')->execute([json_encode(array_map(fn($id) => hash('sha256', (string)$id), $activeHashes))]);
+		$db->prepare('DELETE FROM list WHERE user NOT IN (SELECT value FROM json_each(?))')->execute([json_encode(array_map(fn($id) => hash('sha256', (string)$id), $activeHashes))]);
 	}
 	public function createToken(string $userID, #[SensitiveParameter] string $userLine, #[SensitiveParameter] string $userHash, #[SensitiveParameter] string $userKey): string {
 		$nonce = random_bytes(12);
@@ -154,8 +153,8 @@ class CodesService {
 		$this->sqlService->closeConnection($this->initial->uTemp());
 		$this->db = null;
 	}
-	public function revokeToken(string $userLine): void {$this->getDB()->prepare('UPDATE codes SET token = NULL WHERE user = ?')->execute([$userLine]);}
-	public function setupSchema(PDO $connection): void {$connection->exec('CREATE TABLE IF NOT EXISTS codes (user TEXT PRIMARY KEY, token TEXT)');}
+	public function revokeToken(string $userLine): void {$this->getDB()->prepare('UPDATE list SET token = NULL WHERE user = ?')->execute([$userLine]);}
+	public function setupSchema(PDO $connection): void {$connection->exec('CREATE TABLE IF NOT EXISTS list (user TEXT PRIMARY KEY, token TEXT)');}
 	public function validateToken(#[SensitiveParameter] string $token, string $userID, #[SensitiveParameter] string $userLine, #[SensitiveParameter] string $userHash, #[SensitiveParameter] string $userKey): bool {
 		$stored = $this->getToken($userLine);
 		if ($stored === null || !hash_equals($stored, hash('sha256', $token))) return false;
@@ -176,11 +175,11 @@ class CodesService {
 	}
 	private function queryUser(string $userLine, string $column = 'token'): string|int|false|null {
 		$allowedColumn = match ($column) {'token', '1' => $column, default => throw new \InvalidArgumentException("Invalid column specified: {$column}")};
-		$stmt = $this->getDB()->prepare("SELECT {$allowedColumn} FROM codes WHERE user = ?");
+		$stmt = $this->getDB()->prepare("SELECT {$allowedColumn} FROM list WHERE user = ?");
 		$stmt->execute([$userLine]);
 		return $stmt->fetchColumn();
 	}
-	private function saveToken(string $userLine, string $token): void {$this->getDB()->prepare('INSERT INTO codes (user, token) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET token = excluded.token')->execute([$userLine, hash('sha256', $token)]);}
+	private function saveToken(string $userLine, string $token): void {$this->getDB()->prepare('INSERT INTO list (user, token) VALUES (?, ?) ON CONFLICT(user) DO UPDATE SET token = excluded.token')->execute([$userLine, hash('sha256', $token)]);}
 }
 
 class LangsService {
@@ -253,7 +252,7 @@ class LangsService {
 			$fetchedContents = $this->fetchFile(...array_column($fileList, 'f'));
 			[$addedCount, $updatedCount] = array_reduce($fileList, function($counts, $remoteFile) use ($fetchedContents, $fileMap) {
 				if ($this->verifyFile($remoteFile->f, $remoteFile->h, $fetchedContents[$remoteFile->f] ?? null)) isset($fileMap[$remoteFile->f]) ? $counts[1]++ : $counts[0]++;
-        			return $counts;
+				return $counts;
 			}, [0, 0]);
 		}
 		$prunedCount = $isInitialization ? 0 : $this->pruneFiles(array_column($targetFiles, 'f'));
@@ -269,8 +268,11 @@ class LangsService {
 class UsersService {
 	private ?Memento $stateCache = null;
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService) {}
-	public function caseExists(): bool {return $this->getState()->caseExists;}
-	public function createBase(string $newBase, array $sourceFiles, string $version, #[SensitiveParameter] string $secret): void {$this->buildDatabase($newBase, $this->extractData($sourceFiles, $version, $secret));}
+	public function exist(): bool {return $this->getState()->exist;}
+	public function createBase(string $newBase, array $sourceFiles, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {
+		$data = $this->extractData($sourceFiles, $version, $secret, $alphabet, $offset);
+		$this->buildDatabase($newBase, $data);
+	}
 	public function getHash(int $row): ?string {
 		if ($row <= 0 || !is_readable($this->initial->uList())) return null;
 		$stmt = $this->getConnection($this->initial->uList(), true)->prepare('SELECT bcrypt FROM list WHERE rowid = ?');
@@ -279,6 +281,8 @@ class UsersService {
 	}
 	public function getVersion(): ?int {return $this->getState()->version;}
 	public function getSecret(): ?string {return $this->getState()->secret;}
+	public function getAlphabet(): ?string {return $this->getState()->alphabet;}
+	public function getOffset(): ?int {return $this->getState()->offset;}
 	public function invalidateCache(): void {$this->stateCache = null;}
 	private function buildDatabase(string $newBase, array $data): void {
 		if (file_exists($newBase)) unlink($newBase);
@@ -286,11 +290,9 @@ class UsersService {
 		try {
 			$db->beginTransaction();
 			$db->exec('CREATE TABLE list (bcrypt TEXT)');
-			$db->exec('CREATE TABLE version (number INTEGER NOT NULL)');
-			$db->exec('CREATE TABLE secret (totp TEXT NOT NULL)');
+			$db->exec('CREATE TABLE data (alphabet TEXT NOT NULL, offset INTEGER NOT NULL, secret TEXT NOT NULL, version INTEGER NOT NULL)');
 			if (!empty($data['hashes'])) $db->prepare('INSERT INTO list (bcrypt) SELECT value FROM json_each(?)')->execute([json_encode($data['hashes'])]);
-			$db->prepare('INSERT INTO version (number) VALUES (?)')->execute([$data['version']]);
-			$db->prepare('INSERT INTO secret (totp) VALUES (?)')->execute([$data['secret']]);
+			$db->prepare('INSERT INTO data (alphabet, offset, secret, version) VALUES (?, ?, ?, ?)')->execute([$data['alphabet'], $data['offset'], $data['secret'], $data['version']]);
 			$db->commit();
 		} catch (Throwable $e) {
 			if ($db->inTransaction()) $db->rollBack();
@@ -299,29 +301,31 @@ class UsersService {
 			throw new Alert('Failed to build new user database', 500, 'x9');
 		}
 	}
-	private function extractData(array $sourceFiles, string $version, string $secret): array {
+	private function extractData(array $sourceFiles, string $version, string $secret, ?string $alphabet, ?int $offset): array {
 		$hashes = array_map(fn(string $line) => ($hash = trim($line)) === '' ? null : (password_get_info($hash)['algoName'] === 'bcrypt' ? $hash : throw new Alert('Invalid data format in hashList.txt', 400, 'x4')), explode("\n", ($sourceFiles['hashList.txt']['content'] ?? throw new Alert('File hashList.txt is missing or not readable', 500, 'x3'))));
 		if (!ctype_digit($version)) throw new Alert('Invalid data format in version field', 400, 'x6');
 		$cleanSecret = trim(strtoupper($secret));
 		if (strlen($cleanSecret) !== 32 || preg_match('/[^' . MFAService::ABC . ']/', $cleanSecret)) throw new Alert('Invalid data format in secret field', 400, 'x8');
-		return ['hashes' => $hashes, 'version' => (int)$version, 'secret' => $cleanSecret];
+		if (!is_string($alphabet) || strlen($alphabet) !== 32 || count(array_unique(str_split($alphabet))) !== 32) throw new Alert('Invalid data format in alphabet field', 400, 'x5');
+		if (!is_int($offset) || $offset < 0) throw new Alert('Invalid data format in offset field', 400, 'x5');
+		return ['hashes' => $hashes, 'version' => (int)$version, 'secret' => $cleanSecret, 'alphabet' => $alphabet, 'offset' => $offset];
 	}
 	private function getConnection(string $dbPath): PDO {return $this->sqlService->getConnection($dbPath);}
 	private function getState(): Memento {return $this->stateCache ??= $this->loadState();}
 	private function loadState(): Memento {
 		$uListPath = $this->initial->uList();
-		if (!file_exists($uListPath)) return new Memento(null, null, false); 
-		$result = $this->getConnection($uListPath, true)->query('SELECT (SELECT number FROM version) as version, (SELECT totp FROM secret) as secret')->fetch(PDO::FETCH_ASSOC);
-		return new Memento($result['version'] === null ? null : (int)$result['version'], $result['secret'] ?? null, file_exists($this->initial->uCase()));
+		if (!file_exists($uListPath)) return new Memento(null, null, null, null, false);
+		$data = $this->getConnection($uListPath, true)->query('SELECT alphabet, offset, secret, version FROM data LIMIT 1')->fetch(PDO::FETCH_ASSOC);
+		return new Memento($data['alphabet'] ?? null, $data ? (int)$data['offset'] : null, $data['secret'] ?? null, $data ? (int)$data['version'] : null, file_exists($this->initial->uCase()));
 	}
 }
 
 class UtilsService {
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService, private readonly CodesService $codesService, private readonly UsersService $usersService) {}
-	public function processUpload(Request $request, string $version, #[SensitiveParameter] string $secret): void {
+	public function processUpload(Request $request, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {
 		$tempPath = dirname($this->initial->rData) . DIRECTORY_SEPARATOR . bin2hex(random_bytes(12));
 		try {
-			$newFolder = $this->prepareUpdate($request, $tempPath, $version, $secret);
+			$newFolder = $this->prepareUpdate($request, $tempPath, $version, $secret, $alphabet, $offset);
 			if (file_exists($this->initial->uCase())) {
 				$this->performUpdate($newFolder, $tempPath);
 			} else {
@@ -404,13 +408,13 @@ class UtilsService {
 			if (file_exists($lockFile)) unlink($lockFile);
 		}
 	}
-	private function prepareUpdate(Request $request, string $tempPath, string $version, string $secret): string {
+	private function prepareUpdate(Request $request, string $tempPath, string $version, string $secret, ?string $alphabet, ?int $offset): string {
 		$uploaded = $this->validateFiles($request, $tempPath);
 		$this->checkTokens($uploaded);
 		$newFolder = $tempPath . DIRECTORY_SEPARATOR . 'new';
 		if (!mkdir($newFolder, 0700, true)) throw new Alert('Cannot create new folder', 500, 'b4');
 		$tempSQL = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uList());
-		$this->usersService->createBase($tempSQL, $uploaded, $version, $secret);
+		$this->usersService->createBase($tempSQL, $uploaded, $version, $secret, $alphabet, $offset);
 		if (!chmod($tempSQL, 0600)) throw new Alert('Cannot create new SQL', 500, 'b4');
 		$tempZIP = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uCase());
 		if (!rename($uploaded['fileBase.zip']['path'], $tempZIP)) throw new Alert('Failed to promote ZIP file', 500, 'b6');
@@ -479,15 +483,11 @@ final class Application {
 	public function __construct(private readonly Initial $initial, private readonly Request $request, private readonly CodesService $codesService, private readonly LangsService $langsService, private readonly UsersService $usersService, private readonly UtilsService $utilsService) {}
 	public function run(): void {
 		header_remove('X-Powered-By');
-		if ($_SERVER['REQUEST_METHOD'] === 'GET' && !isset($_GET['status'])) {
+		if ($_SERVER['REQUEST_METHOD'] === 'GET') {
 			header('Location: /', true, 302);
 			exit();
 		}
 		try {
-			if (isset($_GET['status']) && $_GET['status'] === 'check') {
-				$this->sendResponse(['status' => (disk_free_space(dirname($this->initial->rData)) > (Initial::T_SIZE * 100) && ($this->isFirst() || $this->usersService->caseExists())) ? 'ok' : 'error']);
-				exit();
-			}
 			$this->checkEnvironment();
 			if ($_SERVER['REQUEST_METHOD'] === 'HEAD') {
 				http_response_code(200);
@@ -529,8 +529,10 @@ final class Application {
 	private function getClient(): void {
 		$secret = $this->usersService->getSecret();
 		if ($secret === null) return;
+		$alphabet = $this->usersService->getAlphabet() ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5');
+		$offset = $this->usersService->getOffset() ?? throw new Alert('Unbolt offset not configured', 500, 'x5');
 		$token = $this->request->getPost('unbolt');
-		if ($token === null || !MFAService::verifyCode($secret, (string)$token, 10, 6, MFAService::XYZ)) throw new Alert('Authentication required', 401, 'a7');
+		if ($token === null || !MFAService::verifyCode($secret, (string)$token, 10, 6, $alphabet, $offset)) throw new Alert('Authentication required', 401, 'a7');
 	}
 	private function getKey(): ?string {
 		return $this->signatureKey ??= (function(): ?string {
@@ -546,7 +548,7 @@ final class Application {
 	private function handleUpdate(): void {
 		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('update');
 		if (empty($payload['p'])) {
-			$this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($this->usersService->caseExists() ? '1' : '0') . (!$this->isFirst() ? '1' : '0'));
+			$this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($this->usersService->exist() ? '1' : '0') . (!$this->isFirst() ? '1' : '0'));
 			return;
 		}
 		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
@@ -574,9 +576,11 @@ final class Application {
 		Manager::initialize($this->initial);
 		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
 		$user = $this->authenticateRequest($payload);
+		$alphabet = $payload['a'] ?? null;
+		$offset = $payload['o'] ?? null;
+		$secret = $payload['s'] ?? null;
 		$version = $payload['v'] ?? null;
-		$secret = $payload['l'] ?? null;
-		if ($version === null || $secret === null) throw new Alert('Missing required data fields', 400, 'v6');
+		if ($alphabet === null || $offset === null || $secret === null || $version === null) throw new Alert('Missing required data fields', 400, 'v6');
 		if (!$this->isFirst() && (is_dir($this->initial->rData) || !file_exists($this->initial->uCase()))) {
 			$mfaResult = $this->processMFA('0', Initial::O_PASS, $payload['t'] ?? null, (string)($payload['i'] ?? ''), (string)($payload['p'] ?? ''), $payload['h'] ?? null);
 			if (isset($mfaResult['o'])) {
@@ -587,7 +591,7 @@ final class Application {
 			if ($newToken) header(Initial::T_NAME . ':' . $newToken);
 		}
 		if (isset($newToken) && $newToken) error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
-		$this->utilsService->processUpload($this->request, (string)$version, (string)$secret);
+		$this->utilsService->processUpload($this->request, (string)$version, (string)$secret, (string)$alphabet, (int)$offset);
 		$this->langsService->checkUpdate();
 		error_log(Initial::T_NAME . " | ☑️ | ID #{$user['userID']}: upload received | " . $this->request->address);
 		$this->sendResponse('a', 201);
@@ -602,7 +606,7 @@ final class Application {
 			throw new Alert("ID #{$userID}: invalid token", 401, 'q1');
 		}
 		$secret = MFAService::generateSecret($passwordHash . $clientHash, MFAService::ABC);
-		$isValid = $totpCode && strlen($totpCode) === 6 && ctype_digit($totpCode) && MFAService::verifyCode($secret, $totpCode, 6, 30, MFAService::ABC);
+		$isValid = $totpCode && strlen($totpCode) === 6 && ctype_digit($totpCode) && MFAService::verifyCode($secret, $totpCode, 6, 30, MFAService::ABC, 0);
 		if (!$this->codesService->isReady($userLine) && !$isValid) return ['o' => 'otpauth://totp/' . Initial::T_NAME . ":{$userID}?secret={$secret}&issuer=" . Initial::T_NAME];
 		if ($this->codesService->isReady($userLine) && !$isValid) {
 			$this->codesService->revokeToken($userLine);
