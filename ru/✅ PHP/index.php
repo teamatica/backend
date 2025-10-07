@@ -27,7 +27,7 @@ final readonly class Initial {
 	public function uTemp(): string {return $this->rData . DIRECTORY_SEPARATOR . self::T_NAME . '.mfa';}
 }
 
-final readonly class Memento {public function __construct(public ?string $alphabet, public ?int $offset, public ?string $secret, public ?int $version, public bool $exist) {}}
+final readonly class Memento {public function __construct(public ?string $alphabet, public ?int $offset, public ?string $secret, public ?int $version, public bool $zipped) {}}
 
 final readonly class Request {
 	public function getPost(string $key, string|array|null $default = null): string|array|null {return $this->post[$key] ?? $default;}
@@ -107,10 +107,7 @@ class MFAService {
 
 class SQLService {
 	private array $connections = [];
-	public function closeConnection(string $dsn): void {
-		if (isset($this->connections['w_' . $dsn])) unset($this->connections['w_' . $dsn]);
-		if (isset($this->connections['r_' . $dsn])) unset($this->connections['r_' . $dsn]);
-	}
+	public function closeConnection(string $dsn): void {unset($this->connections['w_' . $dsn], $this->connections['r_' . $dsn]);}
 	public function getConnection(string $dsn, bool $readOnly = false): PDO {
 		$key = ($readOnly ? 'r_' : 'w_') . $dsn;
 		return $this->connections[$key] ??= (function() use ($dsn, $readOnly): PDO {
@@ -131,14 +128,7 @@ class SQLService {
 class CodesService {
 	private ?PDO $db = null;
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService) {}
-	public function cleanupTokens(array $activeHashes): void {
-		$db = $this->getDB();
-		if (empty($activeHashes)) {
-			$db->exec('DELETE FROM list');
-			return;
-		}
-		$db->prepare('DELETE FROM list WHERE user NOT IN (SELECT value FROM json_each(?))')->execute([json_encode(array_map(fn($id) => hash('sha256', (string)$id), $activeHashes))]);
-	}
+	public function cleanupTokens(array $activeHashes): void {match (empty($activeHashes)) {true => $this->getDB()->exec('DELETE FROM list'), false => $this->getDB()->prepare('DELETE FROM list WHERE user NOT IN (SELECT value FROM json_each(?))')->execute([json_encode(array_map(fn($id) => hash('sha256', (string)$id), $activeHashes))])};}
 	public function createToken(string $userID, #[SensitiveParameter] string $userLine, #[SensitiveParameter] string $userHash, #[SensitiveParameter] string $userKey): string {
 		$nonce = random_bytes(12);
 		$data = openssl_encrypt(json_encode(['uid' => $userID, 'rnd' => bin2hex(random_bytes(32))]), 'aes-256-gcm', $userKey, OPENSSL_RAW_DATA, $nonce, $tag, $userHash, 16);
@@ -155,16 +145,7 @@ class CodesService {
 	}
 	public function revokeToken(string $userLine): void {$this->getDB()->prepare('UPDATE list SET token = NULL WHERE user = ?')->execute([$userLine]);}
 	public function setupSchema(PDO $connection): void {$connection->exec('CREATE TABLE IF NOT EXISTS list (user TEXT PRIMARY KEY, token TEXT)');}
-	public function validateToken(#[SensitiveParameter] string $token, string $userID, #[SensitiveParameter] string $userLine, #[SensitiveParameter] string $userHash, #[SensitiveParameter] string $userKey): bool {
-		$stored = $this->getToken($userLine);
-		if ($stored === null || !hash_equals($stored, hash('sha256', $token))) return false;
-		$decoded = base64_decode($token, true);
-		if ($decoded === false || strlen($decoded) < 28) return false;
-		$decrypted = openssl_decrypt(substr($decoded, 12, -16), 'aes-256-gcm', $userKey, OPENSSL_RAW_DATA, substr($decoded, 0, 12), substr($decoded, -16), $userHash);
-		if ($decrypted === false) return false;
-		$payload = json_decode($decrypted, true);
-		return is_array($payload) && isset($payload['uid'], $payload['rnd']) && $payload['uid'] === $userID;
-	}
+	public function validateToken(#[SensitiveParameter] string $token, string $userID, #[SensitiveParameter] string $userLine, #[SensitiveParameter] string $userHash, #[SensitiveParameter] string $userKey): bool {return match (true) {($stored = $this->getToken($userLine)) === null => false, !hash_equals($stored, hash('sha256', $token)) => false, ($decoded = base64_decode($token, true)) === false => false, strlen($decoded) < 28 => false, ($decrypted = openssl_decrypt(substr($decoded, 12, -16), 'aes-256-gcm', $userKey, OPENSSL_RAW_DATA, substr($decoded, 0, 12), substr($decoded, -16), $userHash)) === false => false, ($payload = json_decode($decrypted, true)) === null => false, ($payload['uid'] ?? null) !== $userID => false, default => true};}
 	private function getDB(): PDO {
 		return $this->db ??= (function(): PDO {
 			$db = $this->sqlService->getConnection($this->initial->uTemp());
@@ -232,34 +213,24 @@ class LangsService {
 		return array_reduce(glob($this->initial->sLang . DIRECTORY_SEPARATOR . '*.txt') ?: [], fn($count, $path) => !isset($targetMap[basename($path)]) && is_writable($path) && unlink($path) ? $count + 1 : $count, 0);
 	}
 	private function synchronizeData(bool $isInitialization): void {
+		$remoteManifestContent = $this->fetchFile(Initial::S_FILE)[Initial::S_FILE] ?? null;
+		$manifest = $remoteManifestContent ? json_decode($remoteManifestContent) : null;
+		if (!$manifest || !isset($manifest->v, $manifest->f)) {
+			error_log(Initial::T_NAME . ' | ❗ | Not found or invalid: ' . Initial::S_BASE . Initial::S_FILE);
+			return;
+		}
 		$localManifest = $isInitialization ? null : $this->getManifest();
-		$remoteManifest = $this->fetchFile(Initial::S_FILE)[Initial::S_FILE] ?? null;
-		if ($remoteManifest === null) {
-			error_log(Initial::T_NAME . ' | ❗ | Not found: ' . Initial::S_BASE . Initial::S_FILE);
-			return;
-		}
-		$manifest = json_decode($remoteManifest);
-		if (!is_object($manifest) || !isset($manifest->v) || !isset($manifest->f)) {
-			error_log(Initial::T_NAME . ' | ❗ | Invalid data format: ' . Initial::S_BASE . Initial::S_FILE);
-			return;
-		}
 		$this->missingLanguages($manifest->f);
-		$targetFiles = $this->filterFiles($manifest->f);
-		$fileMap = array_column($localManifest->f ?? [], 'v', 'f');
-		$fileList = array_filter($targetFiles, fn($remoteFile) => $isInitialization || ($remoteFile->v > ($fileMap[$remoteFile->f] ?? -1)) || !is_readable($this->initial->sLang . DIRECTORY_SEPARATOR . $remoteFile->f));
-		[$addedCount, $updatedCount] = [0, 0];
+		$fileList = array_filter($targetFiles = $this->filterFiles($manifest->f), fn($remoteFile) => $isInitialization || ($remoteFile->v > (($fileMap = array_column($localManifest->f ?? [], 'v', 'f'))[$remoteFile->f] ?? -1)) || !is_readable($this->initial->sLang . DIRECTORY_SEPARATOR . $remoteFile->f));
+		[$added, $updated] = [0, 0];
 		if (!empty($fileList)) {
 			$fetchedContents = $this->fetchFile(...array_column($fileList, 'f'));
-			[$addedCount, $updatedCount] = array_reduce($fileList, function($counts, $remoteFile) use ($fetchedContents, $fileMap) {
-				if ($this->verifyFile($remoteFile->f, $remoteFile->h, $fetchedContents[$remoteFile->f] ?? null)) isset($fileMap[$remoteFile->f]) ? $counts[1]++ : $counts[0]++;
-				return $counts;
-			}, [0, 0]);
+			[$added, $updated] = array_reduce($fileList, fn($counts, $remoteFile) => !$this->verifyFile($remoteFile->f, $remoteFile->h, $fetchedContents[$remoteFile->f] ?? null) ? $counts : (isset($fileMap[$remoteFile->f]) ? [$counts[0], ++$counts[1]] : [++$counts[0], $counts[1]]), [0, 0]);
 		}
-		$prunedCount = $isInitialization ? 0 : $this->pruneFiles(array_column($targetFiles, 'f'));
-		if ($addedCount > 0 || $updatedCount > 0 || $prunedCount > 0 || ($manifest->v > ($localManifest->v ?? -1))) {
+		$pruned = $isInitialization ? 0 : $this->pruneFiles(array_column($targetFiles, 'f'));
+		if ($added || $updated || $pruned || ($manifest->v > ($localManifest->v ?? -1))) {
 			file_put_contents($this->initial->sLang . DIRECTORY_SEPARATOR . Initial::S_FILE, json_encode(['v' => $manifest->v, 'f' => $targetFiles], JSON_UNESCAPED_UNICODE));
-			$logParts = array_filter(['added' => $addedCount, 'updated' => $updatedCount, 'pruned' => $prunedCount]);
-			if (!empty($logParts)) error_log(Initial::T_NAME . ' | 🔄️ | Languages synchronized (' . implode(', ', array_map(fn($v, $k) => "$k $v", $logParts, array_keys($logParts))) . ')');
+			($logParts = array_filter(['added' => $added, 'updated' => $updated, 'pruned' => $pruned])) && error_log(Initial::T_NAME . ' | 🔄️ | Lang sync: ' . implode(', ', array_map(fn($v, $k) => "$k $v", $logParts, array_keys($logParts))));
 		}
 	}
 	private function verifyFile(string $filename, string $expectedHash, ?string $content): bool {return match (true) {$content === null => false, !hash_equals($expectedHash, hash('sha256', $content)) => !error_log(Initial::T_NAME . ' | ❗ | Wrong file: ' . Initial::S_BASE . $filename), !mb_check_encoding($content, 'UTF-8') =>!error_log(Initial::T_NAME . ' | ⛔ | Invalid encoding: ' . Initial::S_BASE . $filename), default => file_put_contents($this->initial->sLang . DIRECTORY_SEPARATOR . $filename, $content) !== false};}
@@ -268,30 +239,26 @@ class LangsService {
 class UsersService {
 	private ?Memento $stateCache = null;
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService) {}
-	public function exist(): bool {return $this->getState()->exist;}
 	public function createBase(string $newBase, array $sourceFiles, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {
 		$data = $this->extractData($sourceFiles, $version, $secret, $alphabet, $offset);
 		$this->buildDatabase($newBase, $data);
 	}
 	public function getHash(int $row): ?string {
 		if ($row <= 0 || !is_readable($this->initial->uList())) return null;
-		$stmt = $this->getConnection($this->initial->uList(), true)->prepare('SELECT bcrypt FROM list WHERE rowid = ?');
+		$stmt = $this->getConnection($this->initial->uList(), true)->prepare('SELECT user FROM list WHERE rowid = ?');
 		$stmt->execute([$row]);
 		return $stmt->fetchColumn() ?: null;
 	}
-	public function getVersion(): ?int {return $this->getState()->version;}
-	public function getSecret(): ?string {return $this->getState()->secret;}
-	public function getAlphabet(): ?string {return $this->getState()->alphabet;}
-	public function getOffset(): ?int {return $this->getState()->offset;}
+	public function getState(): Memento {return $this->stateCache ??= $this->loadState();}
 	public function invalidateCache(): void {$this->stateCache = null;}
 	private function buildDatabase(string $newBase, array $data): void {
 		if (file_exists($newBase)) unlink($newBase);
 		$db = $this->getConnection($newBase);
 		try {
 			$db->beginTransaction();
-			$db->exec('CREATE TABLE list (bcrypt TEXT)');
+			$db->exec('CREATE TABLE list (user TEXT)');
 			$db->exec('CREATE TABLE data (alphabet TEXT NOT NULL, offset INTEGER NOT NULL, secret TEXT NOT NULL, version INTEGER NOT NULL)');
-			if (!empty($data['hashes'])) $db->prepare('INSERT INTO list (bcrypt) SELECT value FROM json_each(?)')->execute([json_encode($data['hashes'])]);
+			if (!empty($data['hashes'])) $db->prepare('INSERT INTO list (user) SELECT value FROM json_each(?)')->execute([json_encode($data['hashes'])]);
 			$db->prepare('INSERT INTO data (alphabet, offset, secret, version) VALUES (?, ?, ?, ?)')->execute([$data['alphabet'], $data['offset'], $data['secret'], $data['version']]);
 			$db->commit();
 		} catch (Throwable $e) {
@@ -302,16 +269,11 @@ class UsersService {
 		}
 	}
 	private function extractData(array $sourceFiles, string $version, string $secret, ?string $alphabet, ?int $offset): array {
-		$hashes = array_map(fn(string $line) => ($hash = trim($line)) === '' ? null : (password_get_info($hash)['algoName'] === 'bcrypt' ? $hash : throw new Alert('Invalid data format in hashList.txt', 400, 'x4')), explode("\n", ($sourceFiles['hashList.txt']['content'] ?? throw new Alert('File hashList.txt is missing or not readable', 500, 'x3'))));
-		if (!ctype_digit($version)) throw new Alert('Invalid data format in version field', 400, 'x6');
 		$cleanSecret = trim(strtoupper($secret));
-		if (strlen($cleanSecret) !== 32 || preg_match('/[^' . MFAService::ABC . ']/', $cleanSecret)) throw new Alert('Invalid data format in secret field', 400, 'x8');
-		if (!is_string($alphabet) || strlen($alphabet) !== 32 || count(array_unique(str_split($alphabet))) !== 32) throw new Alert('Invalid data format in alphabet field', 400, 'x5');
-		if (!is_int($offset) || $offset < 0) throw new Alert('Invalid data format in offset field', 400, 'x5');
-		return ['hashes' => $hashes, 'version' => (int)$version, 'secret' => $cleanSecret, 'alphabet' => $alphabet, 'offset' => $offset];
+		match (true) {!ctype_digit($version) => throw new Alert('Invalid data format in version field', 400, 'x6'), strlen($cleanSecret) !== 32 || preg_match('/[^' . MFAService::ABC . ']/', $cleanSecret) => throw new Alert('Invalid data format in secret field', 400, 'x8'), !is_string($alphabet) || strlen($alphabet) !== 32 || count(array_unique(str_split($alphabet))) !== 32 => throw new Alert('Invalid data format in alphabet field', 400, 'x5'), !is_int($offset) || $offset < 0 => throw new Alert('Invalid data format in offset field', 400, 'x5'), default => true};
+		return ['hashes' => array_map(fn(string $line) => ($hash = trim($line)) === '' ? null : (password_get_info($hash)['algoName'] === 'bcrypt' ? $hash : throw new Alert('Invalid data format in hashList.txt', 400, 'x4')), explode("\n", ($sourceFiles['hashList.txt']['content'] ?? throw new Alert('File hashList.txt is missing or not readable', 500, 'x3')))), 'version' => (int)$version, 'secret' => $cleanSecret, 'alphabet' => $alphabet, 'offset' => $offset];
 	}
 	private function getConnection(string $dbPath): PDO {return $this->sqlService->getConnection($dbPath);}
-	private function getState(): Memento {return $this->stateCache ??= $this->loadState();}
 	private function loadState(): Memento {
 		$uListPath = $this->initial->uList();
 		if (!file_exists($uListPath)) return new Memento(null, null, null, null, false);
@@ -354,11 +316,8 @@ class UtilsService {
 		exit();
 	}
 	private function checkTokens(array $uploaded): void {
-		$hashListContent = $uploaded['hashList.txt']['content'] ?? null;
-		if ($hashListContent === null) return;
-		$newData = array_filter(explode("\n", trim($hashListContent)));
-		if (empty($newData)) $newData = [];
-		$this->codesService->cleanupTokens([Initial::O_PASS, ...$newData]);
+		if (($hashListContent = $uploaded['hashList.txt']['content'] ?? null) === null) return;
+		$this->codesService->cleanupTokens([Initial::O_PASS, ...array_filter(explode("\n", trim($hashListContent)))]);
 	}
 	private function initialActivation(string $newFolder): void {
 		if (is_dir($this->initial->rData)) Manager::recursiveRemove($this->initial->rData, $this->initial->aBase);
@@ -478,6 +437,7 @@ class UtilsService {
 }
 
 final class Application {
+	private ?Memento $state = null;
 	private ?bool $isFirst = null;
 	private ?string $signatureKey = null;
 	public function __construct(private readonly Initial $initial, private readonly Request $request, private readonly CodesService $codesService, private readonly LangsService $langsService, private readonly UsersService $usersService, private readonly UtilsService $utilsService) {}
@@ -505,13 +465,8 @@ final class Application {
 	}
 	public static function boot(): self {
 		$initial = new Initial(__DIR__);
-		$request = Request::loadFrom();
 		$sqlService = new SQLService();
-		$codesService = new CodesService($initial, $sqlService);
-		$langsService = new LangsService($initial);
-		$usersService = new UsersService($initial, $sqlService);
-		$utilsService = new UtilsService($initial, $sqlService, $codesService, $usersService);
-		return new self($initial, $request, $codesService, $langsService, $usersService, $utilsService);
+		return new self($initial, Request::loadFrom(), $codesService = new CodesService($initial, $sqlService), new LangsService($initial), $usersService = new UsersService($initial, $sqlService), new UtilsService($initial, $sqlService, $codesService, $usersService));
 	}
 	private function authenticateRequest(#[SensitiveParameter] array $payload): array {
 		$isOperator = !ctype_digit((string)($payload['i'] ?? ''));
@@ -520,23 +475,19 @@ final class Application {
 		return ['userID' => $userID, 'isOperator' => $isOperator, 'passwordHash' => $passwordHash];
 	}
 	private function checkEnvironment(): void {
-		if (version_compare(PHP_VERSION, '8.2.0', '<')) throw new Alert('PHP: unsupported version', 501, 'x0');
 		$missing = array_filter(['ctype', 'curl', 'hash', 'json', 'mbstring', 'openssl', 'pcre', 'pdo_sqlite'], fn($ext) => !extension_loaded($ext));
-		if (!empty($missing)) throw new Alert('PHP: ' . implode(', ', $missing), 501, 'x0');
-		if (ini_parse_quantity(ini_get('upload_max_filesize')) < Initial::T_SIZE) throw new Alert('PHP: upload_max_filesize is too small', 501, 'x0');
-		if (ini_parse_quantity(ini_get('post_max_size')) < Initial::T_SIZE) throw new Alert('PHP: post_max_size is too small', 501, 'x0');
+		match (true) {version_compare(PHP_VERSION, '8.2.0', '<') => throw new Alert('PHP: unsupported version', 501, 'x0'), !empty($missing) => throw new Alert('PHP: ' . implode(', ', $missing), 501, 'x0'), ini_parse_quantity(ini_get('upload_max_filesize')) < Initial::T_SIZE => throw new Alert('PHP: upload_max_filesize is too small', 501, 'x0'), ini_parse_quantity(ini_get('post_max_size')) < Initial::T_SIZE => throw new Alert('PHP: post_max_size is too small', 501, 'x0'), default => true};
 	}
 	private function getClient(): void {
-		$secret = $this->usersService->getSecret();
-		if ($secret === null) return;
-		$alphabet = $this->usersService->getAlphabet() ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5');
-		$offset = $this->usersService->getOffset() ?? throw new Alert('Unbolt offset not configured', 500, 'x5');
-		$token = $this->request->getPost('unbolt');
-		if ($token === null || !MFAService::verifyCode($secret, (string)$token, 10, 6, $alphabet, $offset)) throw new Alert('Authentication required', 401, 'a7');
+		$state = $this->getState();
+		if ($state->secret === null) return;
+		$alphabet = $state->alphabet ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5');
+		$offset = $state->offset ?? throw new Alert('Unbolt offset not configured', 500, 'x5');
+		($token = $this->request->getPost('unbolt')) === null || MFAService::verifyCode($state->secret, (string)$token, 10, 6, $alphabet, $offset) || throw new Alert('Authentication required', 401, 'a7');
 	}
 	private function getKey(): ?string {
 		return $this->signatureKey ??= (function(): ?string {
-			$secret = $this->usersService->getSecret();
+			$secret = $this->getState()->secret;
 			return $secret === null ? null : hash('sha256', gmdate('Y-m-d') . $secret, true);
 		})();
 	}
@@ -545,23 +496,24 @@ final class Application {
 		if (!is_string($payload) || $payload === '') throw new Alert('Invalid payload', 400, 'v1');
 		return ['raw' => $payload, 'decoded' => $this->validatePayload($payload)];
 	}
+	private function getState(): Memento {return $this->state ??= $this->usersService->getState();}
 	private function handleUpdate(): void {
 		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('update');
+		$state = $this->getState();
 		if (empty($payload['p'])) {
-			$this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($this->usersService->exist() ? '1' : '0') . (!$this->isFirst() ? '1' : '0'));
+			$this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($state->zipped ? '1' : '0') . (!$this->isFirst() ? '1' : '0'));
 			return;
 		}
 		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
 		$user = $this->authenticateRequest($payload);
 		$clientVersion = (int)($payload['v'] ?? 0);
-		$serverVersion = $this->usersService->getVersion() ?? throw new Alert('Version not found', 404, 'a2');
+		$serverVersion = $state->version ?? throw new Alert('Version not found', 404, 'a2');
 		$mfaResult = ($serverVersion > 0 || (!$this->isFirst() && $user['isOperator'] && $clientVersion > -2)) ? $this->processMFA((string)$user['userID'], $user['passwordHash'], $payload['t'] ?? null, $user['isOperator'] ? (string)$payload['i'] : (string)$user['userID'], $payload['p'], $payload['h'] ?? null) : ['token' => null];
 		if (isset($mfaResult['o'])) {
 			$this->sendResponse($mfaResult['o']);
 			return;
 		}
-		$newToken = $mfaResult['token'] ?? null;
-		if ($newToken) error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
+		($newToken = $mfaResult['token'] ?? null) && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
 		if ($serverVersion === $clientVersion) {
 			if ($newToken) header(Initial::T_NAME . ':' . $newToken);
 			$this->sendResponse('a3');
@@ -581,16 +533,13 @@ final class Application {
 		$secret = $payload['s'] ?? null;
 		$version = $payload['v'] ?? null;
 		if ($alphabet === null || $offset === null || $secret === null || $version === null) throw new Alert('Missing required data fields', 400, 'v6');
+		$newToken = null;
 		if (!$this->isFirst() && (is_dir($this->initial->rData) || !file_exists($this->initial->uCase()))) {
 			$mfaResult = $this->processMFA('0', Initial::O_PASS, $payload['t'] ?? null, (string)($payload['i'] ?? ''), (string)($payload['p'] ?? ''), $payload['h'] ?? null);
-			if (isset($mfaResult['o'])) {
-				$this->sendResponse($mfaResult['o']);
-				return;
-			}
-			$newToken = $mfaResult['token'] ?? null;
-			if ($newToken) header(Initial::T_NAME . ':' . $newToken);
+			isset($mfaResult['o']) && ($this->sendResponse($mfaResult['o']) || exit());
+			($newToken = $mfaResult['token'] ?? null) && header(Initial::T_NAME . ':' . $newToken);
 		}
-		if (isset($newToken) && $newToken) error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
+		$newToken && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
 		$this->utilsService->processUpload($this->request, (string)$version, (string)$secret, (string)$alphabet, (int)$offset);
 		$this->langsService->checkUpdate();
 		error_log(Initial::T_NAME . " | ☑️ | ID #{$user['userID']}: upload received | " . $this->request->address);
@@ -627,25 +576,21 @@ final class Application {
 		$e && exit();
 	}
 	private function validatePayload(#[SensitiveParameter] string $rawPayload): array {
-		if (strlen($rawPayload) > 600) throw new Alert('Invalid JSON', 400, 'v1');
+		strlen($rawPayload) < 601 || throw new Alert('Invalid JSON', 400, 'v1');
 		$payload = json_decode($rawPayload, true);
-		if (!is_array($payload)) throw new Alert('Payload is not JSON', 400, 'v2');
+		is_array($payload) || throw new Alert('Payload is not JSON', 400, 'v2');
 		$userID = $payload['i'] ?? '-1';
-		if (($payload['c'] ?? null) !== Initial::T_CORE) throw new Alert("ID #{$userID}: wrong version", 400, 'v3');
-		if (isset($payload['p']) && (!isset($payload['w']) || !is_int($payload['w']))) throw new Alert("ID #{$userID}: invalid timestamp", 400, 'v4');
-		if (isset($payload['w']) && abs(time() - $payload['w']) > 30) throw new Alert("ID #{$userID}: request has expired", 408, 'v5');
+		match (true) {($payload['c'] ?? null) !== Initial::T_CORE => throw new Alert("ID #{$userID}: wrong version", 400, 'v3'), isset($payload['p']) && (!isset($payload['w']) || !is_int($payload['w'])) => throw new Alert("ID #{$userID}: invalid timestamp", 400, 'v4'), isset($payload['w']) && abs(time() - $payload['w']) > 30 => throw new Alert("ID #{$userID}: request has expired", 408, 'v5'), default => true};
 		return $payload;
 	}
 	private function verifySignature(#[SensitiveParameter] string $rawPayload, #[SensitiveParameter] ?string $clientSignature): void {
-		$key = $this->getKey();
-		if ($key === null) {
-			if ($this->isFirst()) return;
-			throw new Alert('Cannot generate signature key', 500, 's1');
+		if (($key = $this->getKey()) === null) {
+			$this->isFirst() || throw new Alert('Cannot generate signature key', 500, 's1');
+			return;
 		}
-		if ($clientSignature === null) throw new Alert('Signature is missing', 400, 's2');
-		$decodedSignature = base64_decode($clientSignature, true);
-		if ($decodedSignature === false) throw new Alert('Invalid signature format', 400, 's3');
-		if (!hash_equals(hash_hmac('sha256', $rawPayload, $key, true), $decodedSignature)) throw new Alert('Invalid signature', 401, 's4');
+		$clientSignature !== null || throw new Alert('Signature is missing', 400, 's2');
+		($decodedSignature = base64_decode($clientSignature, true)) !== false || throw new Alert('Invalid signature format', 400, 's3');
+		hash_equals(hash_hmac('sha256', $rawPayload, $key, true), $decodedSignature) || throw new Alert('Invalid signature', 401, 's4');
 	}
 }
 
