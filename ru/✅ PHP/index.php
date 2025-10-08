@@ -144,7 +144,7 @@ class CodesService {
 		$this->db = null;
 	}
 	public function revokeToken(string $userLine): void {$this->getDB()->prepare('UPDATE list SET token = NULL WHERE user = ?')->execute([$userLine]);}
-	public function setupSchema(PDO $connection): void {$connection->exec('CREATE TABLE IF NOT EXISTS list (user TEXT PRIMARY KEY, token TEXT)');}
+	public function setupSchema(PDO $connection): void {$connection->exec('CREATE TABLE IF NOT EXISTS list (user TEXT PRIMARY KEY, token TEXT) WITHOUT ROWID');}
 	public function validateToken(#[SensitiveParameter] string $token, string $userID, #[SensitiveParameter] string $userLine, #[SensitiveParameter] string $userHash, #[SensitiveParameter] string $userKey): bool {return match (true) {($stored = $this->getToken($userLine)) === null => false, !hash_equals($stored, hash('sha256', $token)) => false, ($decoded = base64_decode($token, true)) === false => false, strlen($decoded) < 28 => false, ($decrypted = openssl_decrypt(substr($decoded, 12, -16), 'aes-256-gcm', $userKey, OPENSSL_RAW_DATA, substr($decoded, 0, 12), substr($decoded, -16), $userHash)) === false => false, ($payload = json_decode($decrypted, true)) === null => false, ($payload['uid'] ?? null) !== $userID => false, default => true};}
 	private function getDB(): PDO {
 		return $this->db ??= (function(): PDO {
@@ -576,7 +576,7 @@ final class Application {
 		$e && exit();
 	}
 	private function validatePayload(#[SensitiveParameter] string $rawPayload): array {
-		strlen($rawPayload) < 601 || throw new Alert('Invalid JSON', 400, 'v1');
+		strlen($rawPayload) < 600 || throw new Alert('Invalid JSON', 400, 'v1');
 		$payload = json_decode($rawPayload, true);
 		is_array($payload) || throw new Alert('Payload is not JSON', 400, 'v2');
 		$userID = $payload['i'] ?? '-1';
