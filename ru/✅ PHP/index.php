@@ -230,7 +230,7 @@ class LangsService {
 		$pruned = $isInitialization ? 0 : $this->pruneFiles(array_column($targetFiles, 'f'));
 		if ($added || $updated || $pruned || ($manifest->v > ($localManifest->v ?? -1))) {
 			file_put_contents($this->initial->sLang . DIRECTORY_SEPARATOR . Initial::S_FILE, json_encode(['v' => $manifest->v, 'f' => $targetFiles], JSON_UNESCAPED_UNICODE));
-			($logParts = array_filter(['added' => $added, 'updated' => $updated, 'pruned' => $pruned])) && error_log(Initial::T_NAME . ' | 🔄️ | Lang sync: ' . implode(', ', array_map(fn($v, $k) => "$k $v", $logParts, array_keys($logParts))));
+			($logParts = array_filter(['added' => $added, 'pruned' => $pruned, 'updated' => $updated])) && error_log(Initial::T_NAME . ' | 🔄️ | Languages: ' . implode(', ', array_map(fn($v, $k) => "$k $v", $logParts, array_keys($logParts))));
 		}
 	}
 	private function verifyFile(string $filename, string $expectedHash, ?string $content): bool {return match (true) {$content === null => false, !hash_equals($expectedHash, hash('sha256', $content)) => !error_log(Initial::T_NAME . ' | ❗ | Wrong file: ' . Initial::S_BASE . $filename), !mb_check_encoding($content, 'UTF-8') =>!error_log(Initial::T_NAME . ' | ⛔ | Invalid encoding: ' . Initial::S_BASE . $filename), default => file_put_contents($this->initial->sLang . DIRECTORY_SEPARATOR . $filename, $content) !== false};}
@@ -240,7 +240,7 @@ class UsersService {
 	private ?Memento $stateCache = null;
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService) {}
 	public function createBase(string $newBase, array $sourceFiles, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {
-		$data = $this->extractData($sourceFiles, $version, $secret, $alphabet, $offset);
+		$data = $this->extractData($sourceFiles, $alphabet, $offset, $secret, $version);
 		$this->buildDatabase($newBase, $data);
 	}
 	public function getHash(int $row): ?string {
@@ -268,7 +268,7 @@ class UsersService {
 			throw new Alert('Failed to build new user database', 500, 'x9');
 		}
 	}
-	private function extractData(array $sourceFiles, string $version, string $secret, ?string $alphabet, ?int $offset): array {
+	private function extractData(array $sourceFiles, ?string $alphabet, ?int $offset, string $secret, string $version): array {
 		$cleanSecret = trim(strtoupper($secret));
 		match (true) {!ctype_digit($version) => throw new Alert('Invalid data format in version field', 400, 'x6'), strlen($cleanSecret) !== 32 || preg_match('/[^' . MFAService::ABC . ']/', $cleanSecret) => throw new Alert('Invalid data format in secret field', 400, 'x8'), !is_string($alphabet) || strlen($alphabet) !== 32 || count(array_unique(str_split($alphabet))) !== 32 => throw new Alert('Invalid data format in alphabet field', 400, 'x5'), !is_int($offset) || $offset < 0 => throw new Alert('Invalid data format in offset field', 400, 'x5'), default => true};
 		return ['hashes' => array_map(fn(string $line) => ($hash = trim($line)) === '' ? null : (password_get_info($hash)['algoName'] === 'bcrypt' ? $hash : throw new Alert('Invalid data format in hashList.txt', 400, 'x4')), explode("\n", ($sourceFiles['hashList.txt']['content'] ?? throw new Alert('File hashList.txt is missing or not readable', 500, 'x3')))), 'version' => (int)$version, 'secret' => $cleanSecret, 'alphabet' => $alphabet, 'offset' => $offset];
