@@ -157,7 +157,7 @@ class LangsService {
 	private function fetchFile(string ...$filenames): array {
 		return empty($filenames) ? [] : array_reduce($filenames, function($results, $filename) {
 			if ($curl = curl_init(Initial::S_BASE . $filename)) {
-				curl_setopt_array($curl, [CURLOPT_FAILONERROR => false, CURLOPT_FOLLOWLOCATION => true, CURLOPT_MAXREDIRS => 3, CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_TIMEOUT => 10, CURLOPT_USERAGENT => Initial::T_NAME]);
+				curl_setopt_array($curl, [CURLOPT_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_RETURNTRANSFER => true, CURLOPT_FAILONERROR => false, CURLOPT_FOLLOWLOCATION => false, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => 15, CURLOPT_MAXFILESIZE => 32768, CURLOPT_BUFFERSIZE => 8192, CURLOPT_ENCODING => '', CURLOPT_FORBID_REUSE => true, CURLOPT_FRESH_CONNECT => true, CURLOPT_USERAGENT => Initial::T_NAME]);
 				$content = curl_exec($curl);
 				$results[$filename] = (curl_getinfo($curl, CURLINFO_HTTP_CODE) === 200 && $content !== false) ? $content : (!error_log(Initial::T_NAME . ' | ❗ | Not found: ' . Initial::S_BASE . $filename) ? null : null);
 				curl_close($curl);
