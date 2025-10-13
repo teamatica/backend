@@ -45,8 +45,7 @@ final class Manager {
 			unlink($realPath);
 			return;
 		}
-		$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($realPath, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
-		$files = iterator_to_array($iterator);
+		$files = iterator_to_array(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($realPath, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST));
 		array_walk($files, function($fileinfo) use ($sandboxPath) {
 			$itemPath = $fileinfo->getRealPath();
 			if ($itemPath === false || !str_starts_with($itemPath, $sandboxPath . DIRECTORY_SEPARATOR)) throw new \RuntimeException('Path traversal attempt at: ' . $fileinfo->getPathname());
@@ -413,7 +412,7 @@ final class Application {
 	private function getClient(): void {
 		if (($state = $this->getState())->secret === null) return;
 		$token = $this->request->getPost('unbolt');
-		$token === null || MFAService::verifyCode($state->secret, (string)$token, 10, 6, $state->alphabet ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5'), $state->offset ?? throw new Alert('Unbolt offset not configured', 500, 'x5')) || throw new Alert('Authentication required', 401, 'a7');
+		if ($token === null || !MFAService::verifyCode($state->secret, (string)$token, 10, 6, $state->alphabet ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5'), $state->offset ?? throw new Alert('Unbolt offset not configured', 500, 'x5'))) throw new Alert('Authentication required', 401, 'a7');
 	}
 	private function getKey(): ?string {return $this->signatureKey ??= (($s = $this->getState()->secret) === null ? null : hash('sha256', gmdate('Y-m-d') . $s, true));}
 	private function getPayload(string $postKey): array {return (is_string($payload = $this->request->getPost($postKey)) && $payload !== '') ? ['raw' => $payload, 'decoded' => $this->validatePayload($payload)] : throw new Alert('Invalid payload', 400, 'v1');}
@@ -455,9 +454,10 @@ final class Application {
 		}
 		$newToken && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
 		$this->utilsService->processUpload($this->request, (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o']);
-		$this->langsService->checkUpdate();
 		error_log(Initial::T_NAME . " | ☑️ | ID #{$user['userID']}: upload received | " . $this->request->address);
 		$this->sendResponse('a', 201);
+		if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
+		$this->langsService->checkUpdate();
 	}
 	private function isFirst(): bool {return $this->isFirst ??= !file_exists($this->initial->uList());}
 	private function processMFA(string $userID, #[SensitiveParameter] string $passwordHash, #[SensitiveParameter] ?string $totpCode, ?string $userName, #[SensitiveParameter] ?string $userCode, #[SensitiveParameter] ?string $clientHash): array {
