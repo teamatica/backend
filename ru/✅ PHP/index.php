@@ -60,7 +60,7 @@ class Alert extends Exception {public function __construct(string $message, int 
 class MFAService {
 	public const ABC = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 	public static function generateSecret(#[SensitiveParameter] string $hash, string $alphabet): string {return self::base32Encode(substr(hash('sha256', $hash, true), 0, 20), $alphabet);}
-	public static function verifyCode(#[SensitiveParameter] string $secret, #[SensitiveParameter] string $code, int $digits, int $period, string $alphabet, int $offset): bool {return !(strlen($code) !== $digits || $period <= 0 || !in_array($digits, [6, 10], true)) && array_reduce([-1, 0, 1], fn($found, $i) => $found || hash_equals(self::generateCode($secret, (int)floor(time() / $period) + $i, $digits, $alphabet, $offset), $code), false);}
+	public static function verifyCode(#[SensitiveParameter] string $secret, #[SensitiveParameter] string $code, int $digits, int $period, string $alphabet, int $offset, string $algorithm = 'sha1'): bool {return !(strlen($code) !== $digits || $period <= 0 || !in_array($digits, [6, 18], true)) && array_reduce([-1, 0, 1], fn($found, $i) => $found || hash_equals(self::generateCode($secret, (int)floor(time() / $period) + $i, $digits, $alphabet, $offset, $algorithm), $code), false);}
 	private static function base32Decode(string $secret, string $alphabet): string {
 		if (empty($secret = str_replace('=', '', $secret))) return '';
 		if (strspn($secret, $alphabet) !== strlen($secret)) throw new \InvalidArgumentException('Invalid secret');
@@ -87,9 +87,10 @@ class MFAService {
 		if ($acc['length'] > 0) $acc['encoded'] .= $alphabet[($acc['bits'] << (5 - $acc['length'])) & 31];
 		return $acc['encoded'] . str_repeat('=', (8 - (strlen($acc['encoded']) % 8)) % 8);
 	}
-	private static function generateCode(string $secret, int $slice, int $digits, string $alphabet, int $offset): string {
-		$hmac = hash_hmac('sha1', pack('N', match ($digits) {6 => 0, 10 => $offset, default => throw new \InvalidArgumentException('Invalid code length')}) . pack('N', $slice), self::base32Decode($secret, $alphabet), true);
-		return str_pad((string)((unpack('N', substr($hmac, ord($hmac[19]) & 0xf, 4))[1] & 0x7FFFFFFF) % (10 ** $digits)), $digits, '0', STR_PAD_LEFT);
+	private static function generateCode(string $secret, int $slice, int $digits, string $alphabet, int $offset, string $algorithm = 'sha1'): string {
+		$hmac = hash_hmac($algorithm, pack('N', ($digits >= 18 ? $offset : 0)) . pack('N', $slice), self::base32Decode($secret, $alphabet), true);
+		$dynamicOffset = ord($hmac[strlen($hmac) - 1]) & 0xf;
+		return str_pad((string)((($digits < 18) ? unpack('N', substr($hmac, $dynamicOffset, 4))[1] & 0x7FFFFFFF : unpack('J', substr($hmac, min($dynamicOffset, strlen($hmac) - 8), 8))[1] & 0x7FFFFFFFFFFFFFFF) % (10 ** $digits)), $digits, '0', STR_PAD_LEFT);
 	}
 }
 
@@ -411,8 +412,7 @@ final class Application {
 	}
 	private function getClient(): void {
 		if (($state = $this->getState())->secret === null) return;
-		$token = $this->request->getPost('unbolt');
-		if ($token === null || !MFAService::verifyCode($state->secret, (string)$token, 10, 6, $state->alphabet ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5'), $state->offset ?? throw new Alert('Unbolt offset not configured', 500, 'x5'))) throw new Alert('Authentication required', 401, 'a7');
+		($token = $this->request->getPost('unbolt')) !== null && MFAService::verifyCode($state->secret, (string)$token, 18, 6, $state->alphabet ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5'), $state->offset ?? throw new Alert('Unbolt offset not configured', 500, 'x5'), 'sha256') || throw new Alert('Authentication required', 401, 'a7');
 	}
 	private function getKey(): ?string {return $this->signatureKey ??= (($s = $this->getState()->secret) === null ? null : hash('sha256', gmdate('Y-m-d') . $s, true));}
 	private function getPayload(string $postKey): array {return (is_string($payload = $this->request->getPost($postKey)) && $payload !== '') ? ['raw' => $payload, 'decoded' => $this->validatePayload($payload)] : throw new Alert('Invalid payload', 400, 'v1');}
