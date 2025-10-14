@@ -270,7 +270,7 @@ class UtilsService {
 		header('Content-Length: ' . filesize($filePath));
 		header('Content-Transfer-Encoding: binary');
 		header('Content-Type: application/zip');
-		if ($token) header(Initial::T_NAME . ':' . $token);
+		if ($token) header(Initial::T_NAME . ' :' . $token);
 		if (ob_get_level()) ob_end_clean();
 		readfile($filePath);
 		exit();
@@ -435,7 +435,7 @@ final class Application {
 			return;
 		}
 		($newToken = $mfaResult['token'] ?? null) && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
-		($serverVersion === $clientVersion) && (($newToken ? header(Initial::T_NAME . ':' . $newToken) : null) || true) && $this->sendResponse('a3') && exit();
+		($serverVersion === $clientVersion) && (($newToken ? header(Initial::T_NAME . ' :' . $newToken) : null) || true) && $this->sendResponse('a3') && exit();
 		error_log(Initial::T_NAME . " | ✅ | ID #{$user['userID']}: update sent | " . $this->request->address);
 		$this->utilsService->streamFile($newToken);
 	}
@@ -450,7 +450,7 @@ final class Application {
 		if (!$this->isFirst() && (is_dir($this->initial->rData) || !file_exists($this->initial->uCase()))) {
 			$mfaResult = $this->processMFA('0', Initial::O_PASS, $payload['t'] ?? null, (string)($payload['i'] ?? ''), (string)($payload['p'] ?? ''), $payload['h'] ?? null);
 			isset($mfaResult['o']) && ($this->sendResponse($mfaResult['o']) || exit());
-			($newToken = $mfaResult['token'] ?? null) && header(Initial::T_NAME . ':' . $newToken);
+			($newToken = $mfaResult['token'] ?? null) && header(Initial::T_NAME . ' :' . $newToken);
 		}
 		$newToken && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
 		$this->utilsService->processUpload($this->request, (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o']);
