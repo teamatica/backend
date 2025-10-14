@@ -464,7 +464,7 @@ final class Application {
 		$userLine = hash('sha256', $passwordHash);
 		$userKey = hash_hkdf('sha256', (string)$userName . "\0" . (string)$userCode, 32, '', (string)$clientHash);
 		if ($totpCode && strlen($totpCode) > 6) return $this->codesService->validateToken($totpCode, $userID, $userLine, $passwordHash, $userKey) ? ['token' => $this->codesService->createToken($userID, $userLine, $passwordHash, $userKey)] : $this->handleFailure($userLine, $userID, $totpCode);
-		$mfaSecret = MFAService::generateSecret($passwordHash . $clientHash, MFAService::ABC);
+		$mfaSecret = MFAService::generateSecret($passwordHash . "\0" . $clientHash, MFAService::ABC);
 		return match ([$this->codesService->isReady($userLine), $totpCode && strlen($totpCode) === 6 && ctype_digit($totpCode) && MFAService::verifyCode($mfaSecret, $totpCode, 6, 30, MFAService::ABC, 0)]) {[false, false] => ['o' => 'otpauth://totp/' . Initial::T_NAME . ":{$userID}?secret=" . $mfaSecret . "&issuer=" . Initial::T_NAME], [true, false] => $this->handleFailure($userLine, $userID, $totpCode), default => ['token' => $this->codesService->createToken($userID, $userLine, $passwordHash, $userKey)]};
 	}
 	private function sendResponse(string|array $data, int $httpCode = 200, ?Throwable $e = null): void {
@@ -472,7 +472,7 @@ final class Application {
 		http_response_code($httpCode);
 		header('Content-Type: application/json; charset=UTF-8');
 		$response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES);
-		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response, $key, true)));
+		($key = $this->getKey()) && header('X-Signature: ' . base64_encode(hash_hmac('sha256', $response, $key, true)));
 		echo $response;
 		$e && exit();
 	}
