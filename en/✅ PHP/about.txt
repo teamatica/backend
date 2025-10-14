@@ -1,3 +1,1 @@
-📌 The value of the $coreInfo variable is updated with any configuration change
-
 📌 Help in finding and/or fixing shortcomings of the current version is welcome
