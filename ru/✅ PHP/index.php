@@ -207,7 +207,7 @@ class LangsService {
 class UsersService {
 	private ?Memento $stateCache = null;
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService) {}
-	public function createBase(string $newBase, array $sourceFiles, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {$this->buildDatabase($newBase, $this->extractData($sourceFiles, $alphabet, $offset, $secret, $version));}
+	public function createBase(string $newBase, array $hashes, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {$this->buildDatabase($newBase, $this->extractData($hashes, $alphabet, $offset, $secret, $version));}
 	public function getHash(int $row): ?string {
 		if ($row <= 0 || !is_readable($this->initial->uList())) return null;
 		($stmt = $this->getConnection($this->initial->uList(), true)->prepare('SELECT user FROM list WHERE rowid = ?'))->execute([$row]);
@@ -232,10 +232,11 @@ class UsersService {
 			throw new Alert('Failed to build new user database', 500, 'x9');
 		}
 	}
-	private function extractData(array $sourceFiles, ?string $alphabet, ?int $offset, string $secret, string $version): array {
+	private function extractData(array $hashes, ?string $alphabet, ?int $offset, string $secret, string $version): array {
 		$cleanSecret = trim(strtoupper($secret));
 		match (true) {!ctype_digit($version) => throw new Alert('Invalid data format in version field', 400, 'x6'), strlen($cleanSecret) !== 32 || preg_match('/[^' . MFAService::ABC . ']/', $cleanSecret) => throw new Alert('Invalid data format in secret field', 400, 'x8'), !is_string($alphabet) || strlen($alphabet) !== 32 || count(array_unique(str_split($alphabet))) !== 32 => throw new Alert('Invalid data format in alphabet field', 400, 'x5'), !is_int($offset) || $offset < 0 => throw new Alert('Invalid data format in offset field', 400, 'x5'), default => true};
-		return ['hashes' => array_map(fn(string $line) => ($hash = trim($line)) === '' ? null : (password_get_info($hash)['algoName'] === 'bcrypt' ? $hash : throw new Alert('Invalid data format in hashList.txt', 400, 'x4')), explode("\n", ($sourceFiles['hashList.txt']['content'] ?? throw new Alert('File hashList.txt is missing or not readable', 500, 'x3')))), 'version' => (int)$version, 'secret' => $cleanSecret, 'alphabet' => $alphabet, 'offset' => $offset];
+		$validatedHashes = array_map(fn($hash) => match(true) {($trimmedHash = trim((string)$hash)) === '' => null, password_get_info($trimmedHash)['algoName'] === 'bcrypt' => $trimmedHash, default => throw new Alert('Invalid data format in hash list: invalid hash format', 400, 'x4')}, $hashes);
+		return ['hashes' => $validatedHashes, 'version' => (int)$version, 'secret' => $cleanSecret, 'alphabet' => $alphabet, 'offset' => $offset];
 	}
 	private function getConnection(string $dbPath): PDO {return $this->sqlService->getConnection($dbPath);}
 	private function loadState(): Memento {
@@ -248,10 +249,10 @@ class UsersService {
 
 class UtilsService {
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService, private readonly CodesService $codesService, private readonly UsersService $usersService) {}
-	public function processUpload(Request $request, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {
+	public function processUpload(Request $request, array $hashes, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {
 		$tempPath = dirname($this->initial->rData) . DIRECTORY_SEPARATOR . bin2hex(random_bytes(12));
 		try {
-			$newFolder = $this->prepareUpdate($request, $tempPath, $version, $secret, $alphabet, $offset);
+			$newFolder = $this->prepareUpdate($request, $hashes, $tempPath, $version, $secret, $alphabet, $offset);
 			file_exists($this->initial->uCase()) ? $this->performUpdate($newFolder, $tempPath) : $this->initialActivation($newFolder);
 			$this->usersService->invalidateCache();
 		} finally {
@@ -270,14 +271,14 @@ class UtilsService {
 		header('Content-Length: ' . filesize($filePath));
 		header('Content-Transfer-Encoding: binary');
 		header('Content-Type: application/zip');
-		if ($token) header(Initial::T_NAME . ' :' . $token);
+		if ($token) header(Initial::T_NAME . ':' . $token);
 		if (ob_get_level()) ob_end_clean();
 		readfile($filePath);
 		exit();
 	}
-	private function checkTokens(array $uploaded): void {
-		if (($hashListContent = $uploaded['hashList.txt']['content'] ?? null) === null) return;
-		$this->codesService->cleanupTokens([Initial::O_PASS, ...array_filter(explode("\n", trim($hashListContent)))]);
+	private function checkTokens(array $hashes): void {
+		if (empty($hashes)) return;
+		$this->codesService->cleanupTokens([Initial::O_PASS, ...$hashes]);
 	}
 	private function initialActivation(string $newFolder): void {
 		if (is_dir($this->initial->rData)) Manager::recursiveRemove($this->initial->rData, $this->initial->aBase);
@@ -317,13 +318,13 @@ class UtilsService {
 			file_exists($lockFile) && unlink($lockFile);
 		}
 	}
-	private function prepareUpdate(Request $request, string $tempPath, string $version, string $secret, ?string $alphabet, ?int $offset): string {
+	private function prepareUpdate(Request $request, array $hashes, string $tempPath, string $version, string $secret, ?string $alphabet, ?int $offset): string {
 		$uploaded = $this->validateFiles($request, $tempPath);
-		$this->checkTokens($uploaded);
+		$this->checkTokens($hashes);
 		$newFolder = $tempPath . DIRECTORY_SEPARATOR . 'new';
 		if (!mkdir($newFolder, 0700, true)) throw new Alert('Cannot create new folder', 500, 'b4');
 		$tempSQL = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uList());
-		$this->usersService->createBase($tempSQL, $uploaded, $version, $secret, $alphabet, $offset);
+		$this->usersService->createBase($tempSQL, $hashes, $version, $secret, $alphabet, $offset);
 		if (!chmod($tempSQL, 0600)) throw new Alert('Cannot create new SQL', 500, 'b4');
 		$tempZIP = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uCase());
 		if (!rename($uploaded['fileBase.zip']['path'], $tempZIP)) throw new Alert('Failed to promote ZIP file', 500, 'b6');
@@ -354,21 +355,20 @@ class UtilsService {
 		}, 0);
 		if ($prunedCount > 0) error_log(Initial::T_NAME . " | ♻️ | Pruned backups from {$prunedCount} day" . ($prunedCount > 1 ? 's' : ''));
 	}
-	private function validateFiles(Request $request, string $tempPath): array {
+private function validateFiles(Request $request, string $tempPath): array {
 		Manager::createDirectory($tempPath);
 		Manager::createDirectory($tempDir = $tempPath . DIRECTORY_SEPARATOR . 'temp');
 		$files = $request->files['file'] ?? throw new Alert('Invalid data format', 400, 'b7');
-		(is_array($files) && isset($files['name']) && count($files['name']) === 2) || throw new Alert('Invalid data format', 400, 'b7');
+		(is_array($files) && isset($files['name']) && count(array_filter($files['name'])) === 1) || throw new Alert('Invalid data format', 400, 'b7');
 		disk_free_space(dirname($tempPath)) > (Initial::T_SIZE * 100) || throw new Alert('Not enough disk space', 507, 'b9');
-		return array_reduce(range(0, 1), function($validated, $i) use ($files, $tempDir) {
-			$filename = in_array($name = basename($files['name'][$i]), ['fileBase.zip', 'hashList.txt'], true) ? $name : throw new Alert('Invalid new file: ' . $name, 400, 'b2');
-			$files['error'][$i] === UPLOAD_ERR_OK || throw new Alert("Upload error: {$files['error'][$i]}", 500, 'b6');
-			$files['size'][$i] <= Initial::T_SIZE || throw new Alert('File too large', 413, 'b3');
-			move_uploaded_file($files['tmp_name'][$i], $file = $tempDir . DIRECTORY_SEPARATOR . $filename) && is_readable($file) || throw new Alert('Cannot process temp file', 500, 'b1');
-			$content = null;
-			$filename === 'fileBase.zip' ? (str_starts_with(file_get_contents($file, false, null, 0, 4), "PK\x03\x04") || throw new Alert('Invalid ZIP', 415, 'b2')) : (mb_check_encoding($content = file_get_contents($file), 'UTF-8') || throw new Alert('Invalid TXT', 415, 'b2'));
-			return $validated + [$filename => ['path' => $file, 'content' => $content]];
-		}, []);
+		$i = key(array_filter($files['name']));
+		$filename = basename($files['name'][$i]);
+		$filename === 'fileBase.zip' || throw new Alert('Invalid new file: ' . $filename, 400, 'b2');
+		$files['error'][$i] === UPLOAD_ERR_OK || throw new Alert("Upload error: {$files['error'][$i]}", 500, 'b6');
+		$files['size'][$i] <= Initial::T_SIZE || throw new Alert('File too large', 413, 'b3');
+		move_uploaded_file($files['tmp_name'][$i], $file = $tempDir . DIRECTORY_SEPARATOR . $filename) && is_readable($file) || throw new Alert('Cannot process temp file', 500, 'b1');
+		str_starts_with(file_get_contents($file, false, null, 0, 4), "PK\x03\x04") || throw new Alert('Invalid ZIP', 415, 'b2');
+		return [$filename => ['path' => $file, 'content' => null]];
 	}
 }
 
@@ -435,25 +435,25 @@ final class Application {
 			return;
 		}
 		($newToken = $mfaResult['token'] ?? null) && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
-		($serverVersion === $clientVersion) && (($newToken ? header(Initial::T_NAME . ' :' . $newToken) : null) || true) && $this->sendResponse('a3') && exit();
+		($serverVersion === $clientVersion) && (($newToken ? header(Initial::T_NAME . ':' . $newToken) : null) || true) && $this->sendResponse('a3') && exit();
 		error_log(Initial::T_NAME . " | ✅ | ID #{$user['userID']}: update sent | " . $this->request->address);
 		$this->utilsService->streamFile($newToken);
 	}
-	private function handleUpload(): void {
+private function handleUpload(): void {
 		if (Initial::T_DAYS < 6) throw new Alert('Invalid backup retention period', 500, 'b8');
 		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('upload');
 		Manager::initialize($this->initial);
 		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
 		$user = $this->authenticateRequest($payload);
-		if (!isset($payload['a'], $payload['o'], $payload['s'], $payload['v'])) throw new Alert('Missing required data fields', 400, 'v6');
+		if (!isset($payload['a'], $payload['o'], $payload['s'], $payload['v'], $payload['l']) || !is_array($payload['l'])) throw new Alert('Missing required data fields', 400, 'v6');
 		$newToken = null;
 		if (!$this->isFirst() && (is_dir($this->initial->rData) || !file_exists($this->initial->uCase()))) {
 			$mfaResult = $this->processMFA('0', Initial::O_PASS, $payload['t'] ?? null, (string)($payload['i'] ?? ''), (string)($payload['p'] ?? ''), $payload['h'] ?? null);
 			isset($mfaResult['o']) && ($this->sendResponse($mfaResult['o']) || exit());
-			($newToken = $mfaResult['token'] ?? null) && header(Initial::T_NAME . ' :' . $newToken);
+			($newToken = $mfaResult['token'] ?? null) && header(Initial::T_NAME . ':' . $newToken);
 		}
 		$newToken && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
-		$this->utilsService->processUpload($this->request, (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o']);
+		$this->utilsService->processUpload($this->request, $payload['l'], (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o']);
 		error_log(Initial::T_NAME . " | ☑️ | ID #{$user['userID']}: upload received | " . $this->request->address);
 		$this->sendResponse('a', 201);
 		if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
@@ -472,12 +472,12 @@ final class Application {
 		http_response_code($httpCode);
 		header('Content-Type: application/json; charset=UTF-8');
 		$response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES);
-		($key = $this->getKey()) && header('X-Signature: ' . base64_encode(hash_hmac('sha256', $response, $key, true)));
+		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response, $key, true)));
 		echo $response;
 		$e && exit();
 	}
 	private function validatePayload(#[SensitiveParameter] string $rawPayload): array {
-		strlen($rawPayload) < 600 || throw new Alert('Invalid JSON', 400, 'v1');
+		strlen($rawPayload) < Initial::T_SIZE || throw new Alert('Invalid JSON', 400, 'v1');
 		$payload = json_decode($rawPayload, true);
 		is_array($payload) || throw new Alert('Payload is not JSON', 400, 'v2');
 		$userID = $payload['i'] ?? '-1';
