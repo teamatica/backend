@@ -27,7 +27,7 @@ final readonly class Initial {
 	public function uTemp(): string {return $this->rData . DIRECTORY_SEPARATOR . self::T_NAME . '.mfa';}
 }
 
-final readonly class Memento {public function __construct(public ?string $alphabet, public ?int $offset, public ?string $secret, public ?int $version, public bool $zipped) {}}
+final readonly class Memento {public function __construct(public ?string $alphabet, public ?int $offset, public ?string $secret, public ?string $serial, public ?int $version, public bool $zipped) {}}
 
 final readonly class Request {
 	public function getPost(string $key, string|array|null $default = null): string|array|null {return $this->post[$key] ?? $default;}
@@ -157,7 +157,7 @@ class LangsService {
 	private function fetchFile(string ...$filenames): array {
 		return empty($filenames) ? [] : array_reduce($filenames, function($results, $filename) {
 			if ($curl = curl_init(Initial::S_BASE . $filename)) {
-				curl_setopt_array($curl, [CURLOPT_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_RETURNTRANSFER => true, CURLOPT_FAILONERROR => false, CURLOPT_FOLLOWLOCATION => false, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_TIMEOUT => 15, CURLOPT_MAXFILESIZE => 32768, CURLOPT_BUFFERSIZE => 8192, CURLOPT_ENCODING => '', CURLOPT_FORBID_REUSE => true, CURLOPT_FRESH_CONNECT => true, CURLOPT_USERAGENT => Initial::T_NAME]);
+				curl_setopt_array($curl, [CURLOPT_BUFFERSIZE => 8192, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_ENCODING => '', CURLOPT_FAILONERROR => false, CURLOPT_FOLLOWLOCATION => false, CURLOPT_FORBID_REUSE => true, CURLOPT_FRESH_CONNECT => true, CURLOPT_MAXFILESIZE => 32768, CURLOPT_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_TIMEOUT => 5, CURLOPT_USERAGENT => Initial::T_NAME]);
 				$content = curl_exec($curl);
 				$results[$filename] = (curl_getinfo($curl, CURLINFO_HTTP_CODE) === 200 && $content !== false) ? $content : (!error_log(Initial::T_NAME . ' | ❗ | Not found: ' . Initial::S_BASE . $filename) ? null : null);
 				curl_close($curl);
@@ -207,7 +207,7 @@ class LangsService {
 class UsersService {
 	private ?Memento $stateCache = null;
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService) {}
-	public function createBase(string $newBase, array $hashes, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {$this->buildDatabase($newBase, $this->extractData($hashes, $alphabet, $offset, $secret, $version));}
+	public function createBase(string $newBase, array $hashes, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset, ?string $serial): void {$this->buildDatabase($newBase, $this->extractData($hashes, $alphabet, $offset, $secret, $version), $serial);}
 	public function getHash(int $row): ?string {
 		if ($row <= 0 || !is_readable($this->initial->uList())) return null;
 		($stmt = $this->getConnection($this->initial->uList(), true)->prepare('SELECT user FROM list WHERE rowid = ?'))->execute([$row]);
@@ -215,15 +215,15 @@ class UsersService {
 	}
 	public function getState(): Memento {return $this->stateCache ??= $this->loadState();}
 	public function invalidateCache(): void {$this->stateCache = null;}
-	private function buildDatabase(string $newBase, array $data): void {
+	private function buildDatabase(string $newBase, array $data, ?string $serial): void {
 		if (file_exists($newBase)) unlink($newBase);
 		$db = $this->getConnection($newBase);
 		try {
 			$db->beginTransaction();
 			$db->exec('CREATE TABLE list (user TEXT)');
-			$db->exec('CREATE TABLE data (alphabet TEXT NOT NULL, offset INTEGER NOT NULL, secret TEXT NOT NULL, version INTEGER NOT NULL)');
+			$db->exec('CREATE TABLE data (alphabet TEXT NOT NULL, offset INTEGER NOT NULL, secret TEXT NOT NULL, serial TEXT NOT NULL, version INTEGER NOT NULL)');
 			if (!empty($data['hashes'])) $db->prepare('INSERT INTO list (user) SELECT value FROM json_each(?)')->execute([json_encode($data['hashes'])]);
-			$db->prepare('INSERT INTO data (alphabet, offset, secret, version) VALUES (?, ?, ?, ?)')->execute([$data['alphabet'], $data['offset'], $data['secret'], $data['version']]);
+			$db->prepare('INSERT INTO data (alphabet, offset, secret, serial, version) VALUES (?, ?, ?, ?, ?)')->execute([$data['alphabet'], $data['offset'], $data['secret'], $serial ?? 'N/A', $data['version']]);
 			$db->commit();
 		} catch (Throwable $e) {
 			if ($db->inTransaction()) $db->rollBack();
@@ -241,18 +241,16 @@ class UsersService {
 	private function getConnection(string $dbPath): PDO {return $this->sqlService->getConnection($dbPath);}
 	private function loadState(): Memento {
 		$uListPath = $this->initial->uList();
-		if (!file_exists($uListPath)) return new Memento(null, null, null, null, false);
-		$data = $this->getConnection($uListPath, true)->query('SELECT alphabet, offset, secret, version FROM data LIMIT 1')->fetch(PDO::FETCH_ASSOC);
-		return new Memento($data['alphabet'] ?? null, $data ? (int)$data['offset'] : null, $data['secret'] ?? null, $data ? (int)$data['version'] : null, file_exists($this->initial->uCase()));
+		return file_exists($uListPath) ? (fn($data) => new Memento($data['alphabet'] ?? null, (int)($data['offset'] ?? 0), $data['secret'] ?? null, $data['serial'] ?? null, $data ? (int)$data['version'] : null, file_exists($this->initial->uCase())))($this->getConnection($uListPath, true)->query('SELECT alphabet, offset, secret, serial, version FROM data LIMIT 1')->fetch(PDO::FETCH_ASSOC)) : new Memento(null, null, null, null, null, false);
 	}
 }
 
 class UtilsService {
 	public function __construct(private readonly Initial $initial, private readonly SQLService $sqlService, private readonly CodesService $codesService, private readonly UsersService $usersService) {}
-	public function processUpload(Request $request, array $hashes, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset): void {
+	public function processUpload(Request $request, array $hashes, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset, ?string $serial): void {
 		$tempPath = dirname($this->initial->rData) . DIRECTORY_SEPARATOR . bin2hex(random_bytes(12));
 		try {
-			$newFolder = $this->prepareUpdate($request, $hashes, $tempPath, $version, $secret, $alphabet, $offset);
+			$newFolder = $this->prepareUpdate($request, $hashes, $tempPath, $version, $secret, $alphabet, $offset, $serial);
 			file_exists($this->initial->uCase()) ? $this->performUpdate($newFolder, $tempPath) : $this->initialActivation($newFolder);
 			$this->usersService->invalidateCache();
 		} finally {
@@ -276,10 +274,7 @@ class UtilsService {
 		readfile($filePath);
 		exit();
 	}
-	private function checkTokens(array $hashes): void {
-		if (empty($hashes)) return;
-		$this->codesService->cleanupTokens([Initial::O_PASS, ...$hashes]);
-	}
+	private function checkTokens(array $hashes): void {if (!empty($hashes)) $this->codesService->cleanupTokens([Initial::O_PASS, ...$hashes]);}
 	private function initialActivation(string $newFolder): void {
 		if (is_dir($this->initial->rData)) Manager::recursiveRemove($this->initial->rData, $this->initial->aBase);
 		if (!rename($newFolder, $this->initial->rData)) throw new Alert('Failed to activate initial version', 500, 'b0');
@@ -318,18 +313,19 @@ class UtilsService {
 			file_exists($lockFile) && unlink($lockFile);
 		}
 	}
-	private function prepareUpdate(Request $request, array $hashes, string $tempPath, string $version, string $secret, ?string $alphabet, ?int $offset): string {
-		$uploaded = $this->validateFiles($request, $tempPath);
-		$this->checkTokens($hashes);
-		$newFolder = $tempPath . DIRECTORY_SEPARATOR . 'new';
-		if (!mkdir($newFolder, 0700, true)) throw new Alert('Cannot create new folder', 500, 'b4');
-		$tempSQL = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uList());
-		$this->usersService->createBase($tempSQL, $hashes, $version, $secret, $alphabet, $offset);
-		if (!chmod($tempSQL, 0600)) throw new Alert('Cannot create new SQL', 500, 'b4');
-		$tempZIP = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uCase());
-		if (!rename($uploaded['fileBase.zip']['path'], $tempZIP)) throw new Alert('Failed to promote ZIP file', 500, 'b6');
-		if (!chmod($tempZIP, 0600)) throw new Alert('Cannot create new ZIP', 500, 'b4');
-		return $newFolder;
+	private function prepareUpdate(Request $request, array $hashes, string $tempPath, string $version, #[SensitiveParameter] string $secret, #[SensitiveParameter] ?string $alphabet, ?int $offset, ?string $serial): string {
+		($oldUmask = umask(0077)) && ($uploaded = $this->validateFile($request, $tempPath)) && $this->checkTokens($hashes);
+		try {
+			$newFolder = $tempPath . DIRECTORY_SEPARATOR . 'new';
+			if (!mkdir($newFolder, 0700, true)) throw new Alert('Cannot create new folder', 500, 'b4');
+			$tempSQL = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uList());
+			$this->usersService->createBase($tempSQL, $hashes, $version, $secret, $alphabet, $offset, $serial);
+			$tempZIP = $newFolder . DIRECTORY_SEPARATOR . basename($this->initial->uCase());
+			if (!rename($uploaded['fileBase.zip']['path'], $tempZIP)) throw new Alert('Failed to promote ZIP file', 500, 'b6');
+			return $newFolder;
+		} finally {
+			umask($oldUmask);
+		}
 	}
 	private function pruneBackups(): void {
 		if (($backupPath = realpath($this->initial->rCopy)) === false) return;
@@ -338,24 +334,17 @@ class UtilsService {
 		$prunedCount = array_reduce($dayDirs, function($count, $dir) use ($backupPath, $cutoffDate) {
 			$dateStr = str_replace(DIRECTORY_SEPARATOR, '-', substr($dir, strlen($backupPath) + 1));
 			$dirDate = \DateTimeImmutable::createFromFormat('Y-m-d', $dateStr);
-			if ($dirDate === false) {
-				error_log(Initial::T_NAME . " | ❗ | Invalid date format: {$dateStr}");
-				return $count;
-			}
-			if ($dirDate < $cutoffDate) {
+			if ($dirDate !== false && $dirDate < $cutoffDate) {
 				Manager::recursiveRemove($dir, $this->initial->fBase);
-				$parent = dirname($dir);
-				while (($parentPath = realpath($parent)) && $parentPath !== $backupPath && count(scandir($parent)) === 2) {
-					rmdir($parent);
-					$parent = dirname($parent);
-				}
+				for ($parent = dirname($dir); ($parentPath = realpath($parent)) && $parentPath !== $backupPath && count(scandir($parent)) === 2; $parent = dirname($parent)) rmdir($parent);
 				return $count + 1;
 			}
+			if ($dirDate === false) error_log(Initial::T_NAME . " | ❗ | Invalid date format: {$dateStr}");
 			return $count;
 		}, 0);
 		if ($prunedCount > 0) error_log(Initial::T_NAME . " | ♻️ | Pruned backups from {$prunedCount} day" . ($prunedCount > 1 ? 's' : ''));
 	}
-private function validateFiles(Request $request, string $tempPath): array {
+	private function validateFile(Request $request, string $tempPath): array {
 		Manager::createDirectory($tempPath);
 		Manager::createDirectory($tempDir = $tempPath . DIRECTORY_SEPARATOR . 'temp');
 		$files = $request->files['file'] ?? throw new Alert('Invalid data format', 400, 'b7');
@@ -379,18 +368,11 @@ final class Application {
 	public function __construct(private readonly Initial $initial, private readonly Request $request, private readonly CodesService $codesService, private readonly LangsService $langsService, private readonly UsersService $usersService, private readonly UtilsService $utilsService) {}
 	public function run(): void {
 		header_remove('X-Powered-By');
-		if ($_SERVER['REQUEST_METHOD'] === 'GET') {
-			header('Location: /', true, 302);
-			exit();
-		}
+		$_SERVER['REQUEST_METHOD'] === 'GET' && (header('Location: /', true, 302) || exit());
 		try {
 			$this->checkEnvironment();
-			if ($_SERVER['REQUEST_METHOD'] === 'HEAD') {
-				http_response_code(200);
-				exit();
-			}
+			$_SERVER['REQUEST_METHOD'] === 'HEAD' && (http_response_code(200) || exit());
 			header('Cache-Control: no-store, no-cache, must-revalidate');
-			if (!($this->isFirst())) $this->getClient();
 			match (true) {$this->request->getPost('update') !== null => $this->handleUpdate(), $this->request->getPost('upload') !== null => $this->handleUpload(), $this->isFirst() => $this->langsService->initializeLanguages(), default => exit()};
 		} catch (Alert $e) {
 			$this->sendResponse($e->errorCode, $e->getCode(), $e);
@@ -425,6 +407,7 @@ final class Application {
 		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('update');
 		$state = $this->getState();
 		empty($payload['p']) && ($this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($state->zipped ? '1' : '0') . (!$this->isFirst() ? '1' : '0')) || true) && exit();
+		if (!$this->isFirst()) $this->getClient();
 		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
 		$user = $this->authenticateRequest($payload);
 		$clientVersion = (int)($payload['v'] ?? 0);
@@ -439,11 +422,11 @@ final class Application {
 		error_log(Initial::T_NAME . " | ✅ | ID #{$user['userID']}: update sent | " . $this->request->address);
 		$this->utilsService->streamFile($newToken);
 	}
-private function handleUpload(): void {
+	private function handleUpload(): void {
 		if (Initial::T_DAYS < 6) throw new Alert('Invalid backup retention period', 500, 'b8');
 		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('upload');
 		Manager::initialize($this->initial);
-		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
+		$currentSerial = $this->authenticateUpload($rawPayload, $payload);
 		$user = $this->authenticateRequest($payload);
 		if (!isset($payload['a'], $payload['o'], $payload['s'], $payload['v'], $payload['l']) || !is_array($payload['l'])) throw new Alert('Missing required data fields', 400, 'v6');
 		$newToken = null;
@@ -453,11 +436,26 @@ private function handleUpload(): void {
 			($newToken = $mfaResult['token'] ?? null) && header(Initial::T_NAME . ':' . $newToken);
 		}
 		$newToken && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
-		$this->utilsService->processUpload($this->request, $payload['l'], (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o']);
+		$this->utilsService->processUpload($this->request, $payload['l'], (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o'], $currentSerial ?? self::getSerial());
 		error_log(Initial::T_NAME . " | ☑️ | ID #{$user['userID']}: upload received | " . $this->request->address);
 		$this->sendResponse('a', 201);
 		if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
 		$this->langsService->checkUpdate();
+	}
+	private function authenticateUpload(string $rawPayload, array $payload): ?string {
+		if ($this->isFirst()) return null;
+		try {
+			$this->getClient();
+			$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
+			return null;
+		} catch (Alert $e) {
+			$state = $this->getState();
+			if ($e->errorCode !== 'a7' || !(isset($payload['i']) && !ctype_digit((string)$payload['i']))) throw $e;
+			$currentSerial = self::getSerial();
+			if ($state->serial === null || $currentSerial === null || $state->serial === $currentSerial) throw $e;
+			error_log(Initial::T_NAME . ' | 🔓 | Recovery mode activated');
+			return $currentSerial;
+		}
 	}
 	private function isFirst(): bool {return $this->isFirst ??= !file_exists($this->initial->uList());}
 	private function processMFA(string $userID, #[SensitiveParameter] string $passwordHash, #[SensitiveParameter] ?string $totpCode, ?string $userName, #[SensitiveParameter] ?string $userCode, #[SensitiveParameter] ?string $clientHash): array {
@@ -471,26 +469,28 @@ private function handleUpload(): void {
 		$e && error_log(Initial::T_NAME . ' | ' . (($data === 'q2') ? '🔒' : (($httpCode >= 500) ? '⛔' : '🚫')) . ' | ' . $e->getMessage() . " ({$data}) | " . $this->request->address);
 		http_response_code($httpCode);
 		header('Content-Type: application/json; charset=UTF-8');
-		$response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES);
-		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response, $key, true)));
+		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES), $key, true)));
 		echo $response;
 		$e && exit();
 	}
 	private function validatePayload(#[SensitiveParameter] string $rawPayload): array {
-		strlen($rawPayload) < Initial::T_SIZE || throw new Alert('Invalid JSON', 400, 'v1');
-		$payload = json_decode($rawPayload, true);
-		is_array($payload) || throw new Alert('Payload is not JSON', 400, 'v2');
+		strlen($rawPayload) < Initial::T_SIZE / 10 || throw new Alert('Invalid JSON', 400, 'v1');
+		($payload = json_decode($rawPayload, true)) !== null || throw new Alert('Payload is not JSON', 400, 'v2');
 		$userID = $payload['i'] ?? '-1';
 		match (true) {($payload['c'] ?? null) !== Initial::T_CORE => throw new Alert("ID #{$userID}: wrong version", 400, 'v3'), isset($payload['p']) && (!isset($payload['w']) || !is_int($payload['w'])) => throw new Alert("ID #{$userID}: invalid timestamp", 400, 'v4'), isset($payload['w']) && abs(time() - $payload['w']) > 30 => throw new Alert("ID #{$userID}: request has expired", 408, 'v5'), default => true};
 		return $payload;
 	}
 	private function verifySignature(#[SensitiveParameter] string $rawPayload, #[SensitiveParameter] ?string $clientSignature): void {
-		if (($key = $this->getKey()) === null) {
-			$this->isFirst() || throw new Alert('Cannot generate signature key', 500, 's1');
-			return;
-		}
-		$decodedSignature = base64_decode($clientSignature ?? throw new Alert('Signature is missing', 400, 's2'), true) ?: throw new Alert('Invalid signature format', 400, 's3');
-		hash_equals(hash_hmac('sha256', $rawPayload, $key, true), $decodedSignature) || throw new Alert('Invalid signature', 401, 's4');
+		($key = $this->getKey()) !== null || $this->isFirst() || throw new Alert('Cannot generate signature key', 500, 's1');
+		hash_equals(hash_hmac('sha256', $rawPayload, $key, true), base64_decode($clientSignature ?? throw new Alert('Signature is missing', 400, 's2'), true) ?: throw new Alert('Invalid signature format', 400, 's3')) || throw new Alert('Invalid signature', 401, 's4');
+	}
+	private static function getSerial(): ?string {
+		if (!($ch = curl_init('https://' . $_SERVER['HTTP_HOST']))) return null;
+		curl_setopt_array($ch, [CURLOPT_CERTINFO => true, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_NOBODY => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5]);
+		curl_exec($ch);
+		$certInfo = curl_getinfo($ch, CURLINFO_CERTINFO);
+		curl_close($ch);
+		return $certInfo[0]['Serial Number'] ?? null;
 	}
 }
 
