@@ -1,4 +1,4 @@
-<?php //@teamatica │ 0.0.0.0 │ 2025-10-01 23:59:59 UTC+00:00
+<?php //@teamatica │ 0.0.0.0 │ 2025-10-20 23:59:59 UTC+00:00
 
 declare(strict_types=1);
 
@@ -171,8 +171,7 @@ class LangsService {
 		return array_values(array_filter($allFiles, fn($file) => isset($file->f) && isset($allowedMap[strtolower($file->f)])));
 	}
 	private function getManifest(): ?object {
-		$path = $this->initial->sLang . DIRECTORY_SEPARATOR . Initial::S_FILE;
-		$decoded = is_readable($path) ? json_decode(file_get_contents($path)) : null;
+		$decoded = is_readable($path = $this->initial->sLang . DIRECTORY_SEPARATOR . Initial::S_FILE) ? json_decode(file_get_contents($path)) : null;
 		if (is_object($decoded)) $decoded->files ??= [];
 		return $decoded;
 	}
@@ -373,7 +372,7 @@ final class Application {
 			$this->checkEnvironment();
 			$_SERVER['REQUEST_METHOD'] === 'HEAD' && (http_response_code(200) || exit());
 			header('Cache-Control: no-store, no-cache, must-revalidate');
-			match (true) {$this->request->getPost('update') !== null => $this->handleUpdate(), $this->request->getPost('upload') !== null => $this->handleUpload(), $this->isFirst() => $this->langsService->initializeLanguages(), default => exit()};
+			match (true) {$this->request->getPost('update') !== null => $this->handleUpdate(), $this->request->getPost('upload') !== null => $this->handleUpload(), default => exit()};
 		} catch (Alert $e) {
 			$this->sendResponse($e->errorCode, $e->getCode(), $e);
 		} catch (Throwable $e) {
@@ -469,7 +468,8 @@ final class Application {
 		$e && error_log(Initial::T_NAME . ' | ' . (($data === 'q2') ? '🔒' : (($httpCode >= 500) ? '⛔' : '🚫')) . ' | ' . $e->getMessage() . " ({$data}) | " . $this->request->address);
 		http_response_code($httpCode);
 		header('Content-Type: application/json; charset=UTF-8');
-		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES), $key, true)));
+		$response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES);
+		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response, $key, true)));
 		echo $response;
 		$e && exit();
 	}
