@@ -3,8 +3,8 @@
 declare(strict_types=1);
 
 final readonly class Initial {
-	public const O_NAME = '$2y$12$%%%%%';
-	public const O_PASS = '$2y$12$%%%%%';
+	public const O_NAME = '%%%%%';
+	public const O_PASS = '%%%%%';
 	public const S_BASE = 'https://teamatica.github.io/languages/';
 	public const S_FILE = 'file.json';
 	public const S_LIST = ['ru'];
@@ -171,7 +171,8 @@ class LangsService {
 		return array_values(array_filter($allFiles, fn($file) => isset($file->f) && isset($allowedMap[strtolower($file->f)])));
 	}
 	private function getManifest(): ?object {
-		$decoded = is_readable($path = $this->initial->sLang . DIRECTORY_SEPARATOR . Initial::S_FILE) ? json_decode(file_get_contents($path)) : null;
+		$path = $this->initial->sLang . DIRECTORY_SEPARATOR . Initial::S_FILE;
+		$decoded = is_readable($path) ? json_decode(file_get_contents($path)) : null;
 		if (is_object($decoded)) $decoded->files ??= [];
 		return $decoded;
 	}
@@ -381,6 +382,20 @@ final class Application {
 		}
 	}
 	public static function boot(): self {return new self($initial = new Initial(__DIR__), Request::loadFrom(), $codesService = new CodesService($initial, $sqlService = new SQLService()), new LangsService($initial), $usersService = new UsersService($initial, $sqlService), new UtilsService($initial, $sqlService, $codesService, $usersService));}
+	private function authenticateMachine(string $rawPayload, array $payload): ?string {
+		if ($this->isFirst()) return null;
+		try {
+			$this->getClient();
+			$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
+			return null;
+		} catch (Alert $e) {
+			if ($e->errorCode !== 'a7' || !(isset($payload['i']) && !ctype_digit((string)$payload['i']))) throw $e;
+			$state = $this->getState();
+			$serial = self::getSerial();
+			if ($state->serial !== null && $serial !== null && $state->serial !== $serial) return $serial;
+			throw $e;
+		}
+	}
 	private function authenticateRequest(#[SensitiveParameter] array $payload): array {
 		$isOperator = !ctype_digit((string)($payload['i'] ?? ''));
 		[$userID, $passwordHash] = match ($isOperator) {true => [0, Initial::O_PASS], false => [(int)$payload['i'], $this->usersService->getHash((int)$payload['i']) ?? throw new Alert("ID #{$payload['i']}: not found", 404, 'a5')]};
@@ -405,9 +420,9 @@ final class Application {
 	private function handleUpdate(): void {
 		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('update');
 		$state = $this->getState();
-		empty($payload['p']) && ($this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($state->zipped ? '1' : '0') . (!$this->isFirst() ? '1' : '0')) || true) && exit();
-		if (!$this->isFirst()) $this->getClient();
-		$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
+		if (empty($payload['p'])) exit($this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($state->zipped ? '1' : '0') . (!$this->isFirst() ? '1' : '0')));
+		$serial = $this->authenticateMachine($rawPayload, $payload);
+		if ($serial !== null) error_log(Initial::T_NAME . ' | 🔓 | Recovery mode activated');
 		$user = $this->authenticateRequest($payload);
 		$clientVersion = (int)($payload['v'] ?? 0);
 		$serverVersion = $state->version ?? throw new Alert('Version not found', 404, 'a2');
@@ -425,36 +440,22 @@ final class Application {
 		if (Initial::T_DAYS < 6) throw new Alert('Invalid backup retention period', 500, 'b8');
 		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('upload');
 		Manager::initialize($this->initial);
-		$currentSerial = $this->authenticateUpload($rawPayload, $payload);
+		$serial = $this->authenticateMachine($rawPayload, $payload);
 		$user = $this->authenticateRequest($payload);
 		if (!isset($payload['a'], $payload['o'], $payload['s'], $payload['v'], $payload['l']) || !is_array($payload['l'])) throw new Alert('Missing required data fields', 400, 'v6');
 		$newToken = null;
-		if (!$this->isFirst() && (is_dir($this->initial->rData) || !file_exists($this->initial->uCase()))) {
+		if ($serial === null && !$this->isFirst() && (is_dir($this->initial->rData) || !file_exists($this->initial->uCase()))) {
 			$mfaResult = $this->processMFA('0', Initial::O_PASS, $payload['t'] ?? null, (string)($payload['i'] ?? ''), (string)($payload['p'] ?? ''), $payload['h'] ?? null);
 			isset($mfaResult['o']) && ($this->sendResponse($mfaResult['o']) || exit());
 			($newToken = $mfaResult['token'] ?? null) && header(Initial::T_NAME . ':' . $newToken);
 		}
-		$newToken && error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
-		$this->utilsService->processUpload($this->request, $payload['l'], (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o'], $currentSerial ?? self::getSerial());
+		if ($serial !== null) error_log(Initial::T_NAME . ' | 🔓 | Recovery mode activated');
+		if ($newToken) error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
+		$this->utilsService->processUpload($this->request, $payload['l'], (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o'], $serial ?? self::getSerial());
 		error_log(Initial::T_NAME . " | ☑️ | ID #{$user['userID']}: upload received | " . $this->request->address);
 		$this->sendResponse('a', 201);
 		if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
 		$this->langsService->checkUpdate();
-	}
-	private function authenticateUpload(string $rawPayload, array $payload): ?string {
-		if ($this->isFirst()) return null;
-		try {
-			$this->getClient();
-			$this->verifySignature($rawPayload, Request::getHeader('X-Signature'));
-			return null;
-		} catch (Alert $e) {
-			$state = $this->getState();
-			if ($e->errorCode !== 'a7' || !(isset($payload['i']) && !ctype_digit((string)$payload['i']))) throw $e;
-			$currentSerial = self::getSerial();
-			if ($state->serial === null || $currentSerial === null || $state->serial === $currentSerial) throw $e;
-			error_log(Initial::T_NAME . ' | 🔓 | Recovery mode activated');
-			return $currentSerial;
-		}
 	}
 	private function isFirst(): bool {return $this->isFirst ??= !file_exists($this->initial->uList());}
 	private function processMFA(string $userID, #[SensitiveParameter] string $passwordHash, #[SensitiveParameter] ?string $totpCode, ?string $userName, #[SensitiveParameter] ?string $userCode, #[SensitiveParameter] ?string $clientHash): array {
@@ -468,8 +469,7 @@ final class Application {
 		$e && error_log(Initial::T_NAME . ' | ' . (($data === 'q2') ? '🔒' : (($httpCode >= 500) ? '⛔' : '🚫')) . ' | ' . $e->getMessage() . " ({$data}) | " . $this->request->address);
 		http_response_code($httpCode);
 		header('Content-Type: application/json; charset=UTF-8');
-		$response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES);
-		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response, $key, true)));
+		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES), $key, true)));
 		echo $response;
 		$e && exit();
 	}
@@ -485,7 +485,7 @@ final class Application {
 		hash_equals(hash_hmac('sha256', $rawPayload, $key, true), base64_decode($clientSignature ?? throw new Alert('Signature is missing', 400, 's2'), true) ?: throw new Alert('Invalid signature format', 400, 's3')) || throw new Alert('Invalid signature', 401, 's4');
 	}
 	private static function getSerial(): ?string {
-		if (!($ch = curl_init('https://' . $_SERVER['HTTP_HOST']))) return null;
+		if (!($ch = curl_init('%%%%%'))) return null;
 		curl_setopt_array($ch, [CURLOPT_CERTINFO => true, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_NOBODY => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5]);
 		curl_exec($ch);
 		$certInfo = curl_getinfo($ch, CURLINFO_CERTINFO);
