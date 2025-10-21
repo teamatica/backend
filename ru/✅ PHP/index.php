@@ -201,7 +201,7 @@ class LangsService {
 			($logParts = array_filter(['added' => $added, 'pruned' => $pruned, 'updated' => $updated])) && error_log(Initial::T_NAME . ' | 🔄️ | Languages: ' . implode(', ', array_map(fn($v, $k) => "$k $v", $logParts, array_keys($logParts))));
 		}
 	}
-	private function verifyFile(string $filename, string $expectedHash, ?string $content): bool {return match (true) {$content === null => false, !hash_equals($expectedHash, hash('sha256', $content)) => !error_log(Initial::T_NAME . ' | ❗ | Wrong file: ' . Initial::S_BASE . $filename), !mb_check_encoding($content, 'UTF-8') =>!error_log(Initial::T_NAME . ' | ⛔ | Invalid encoding: ' . Initial::S_BASE . $filename), default => file_put_contents($this->initial->sLang . DIRECTORY_SEPARATOR . $filename, $content) !== false};}
+	private function verifyFile(string $filename, string $expectedHash, ?string $content): bool {return match (true) {$content === null => false, !hash_equals($expectedHash, hash('sha256', $content)) => !error_log(Initial::T_NAME . ' | ❗ | Wrong file: ' . Initial::S_BASE . $filename), !mb_check_encoding($content, 'UTF-8') => !error_log(Initial::T_NAME . ' | ⛔ | Invalid encoding: ' . Initial::S_BASE . $filename), default => file_put_contents($this->initial->sLang . DIRECTORY_SEPARATOR . $filename, $content) !== false};}
 }
 
 class UsersService {
@@ -495,5 +495,6 @@ final class Application {
 }
 
 Application::boot()->run();
+
 
 ?>
