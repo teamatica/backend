@@ -255,11 +255,11 @@ class UtilsService {
 			$this->usersService->invalidateCache();
 		} finally {
 			if (is_dir($tempPath)) Manager::recursiveRemove($tempPath, $this->initial->fBase);
-		}
-		try {
-			$this->pruneBackups();
-		} catch (\Throwable $e) {
-			error_log(Initial::T_NAME . " | ❗ | Unable to prune ({$e->getMessage()})");
+			try {
+				$this->pruneBackups();
+			} catch (\Throwable $e) {
+				error_log(Initial::T_NAME . " | ❗ | Unable to prune ({$e->getMessage()})");
+			}
 		}
 	}
 	public function streamFile(?string $token = null): void {
@@ -339,7 +339,7 @@ class UtilsService {
 				for ($parent = dirname($dir); ($parentPath = realpath($parent)) && $parentPath !== $backupPath && count(scandir($parent)) === 2; $parent = dirname($parent)) rmdir($parent);
 				return $count + 1;
 			}
-			return $dirDate === false ? !error_log(Initial::T_NAME . " | ❗ | Invalid date format: {$dateStr}") && $count : $count;
+			return $dirDate === false ? (!error_log(Initial::T_NAME . " | ❗ | Invalid date format: {$dateStr}") || $count) : $count;
 		}, 0);
 		if ($prunedCount > 0) error_log(Initial::T_NAME . " | ♻️ | Pruned backups from {$prunedCount} day" . ($prunedCount > 1 ? 's' : ''));
 	}
