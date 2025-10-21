@@ -496,5 +496,4 @@ final class Application {
 
 Application::boot()->run();
 
-
 ?>
