@@ -223,7 +223,7 @@ class UsersService {
 			$db->exec('CREATE TABLE list (user TEXT)');
 			$db->exec('CREATE TABLE data (alphabet TEXT NOT NULL, offset INTEGER NOT NULL, secret TEXT NOT NULL, serial TEXT NOT NULL, version INTEGER NOT NULL)');
 			if (!empty($data['hashes'])) $db->prepare('INSERT INTO list (user) SELECT value FROM json_each(?)')->execute([json_encode($data['hashes'])]);
-			$db->prepare('INSERT INTO data (alphabet, offset, secret, serial, version) VALUES (?, ?, ?, ?, ?)')->execute([$data['alphabet'], $data['offset'], $data['secret'], $serial ?? 'N/A', $data['version']]);
+			$db->prepare('INSERT INTO data (alphabet, offset, secret, serial, version) VALUES (?, ?, ?, ?, ?)')->execute([$data['alphabet'], $data['offset'], $data['secret'], $serial ?? Initial::T_NAME, $data['version']]);
 			$db->commit();
 		} catch (Throwable $e) {
 			if ($db->inTransaction()) $db->rollBack();
@@ -339,8 +339,7 @@ class UtilsService {
 				for ($parent = dirname($dir); ($parentPath = realpath($parent)) && $parentPath !== $backupPath && count(scandir($parent)) === 2; $parent = dirname($parent)) rmdir($parent);
 				return $count + 1;
 			}
-			if ($dirDate === false) error_log(Initial::T_NAME . " | ❗ | Invalid date format: {$dateStr}");
-			return $count;
+			return $dirDate === false ? !error_log(Initial::T_NAME . " | ❗ | Invalid date format: {$dateStr}") && $count : $count;
 		}, 0);
 		if ($prunedCount > 0) error_log(Initial::T_NAME . " | ♻️ | Pruned backups from {$prunedCount} day" . ($prunedCount > 1 ? 's' : ''));
 	}
@@ -402,10 +401,7 @@ final class Application {
 		if (!password_verify((string)($payload['p'] ?? ''), $passwordHash) || ($isOperator && !password_verify((string)($payload['i'] ?? ''), Initial::O_NAME))) throw new Alert("ID #{$userID}: authentication failed", 401, 'a1');
 		return ['userID' => $userID, 'isOperator' => $isOperator, 'passwordHash' => $passwordHash];
 	}
-	private function checkEnvironment(): void {
-		$missing = array_filter(['ctype', 'curl', 'hash', 'json', 'mbstring', 'openssl', 'pcre', 'pdo_sqlite'], fn($ext) => !extension_loaded($ext));
-		match (true) {version_compare(PHP_VERSION, '8.2.0', '<') => throw new Alert('PHP: unsupported version', 501, 'x0'), !empty($missing) => throw new Alert('PHP: ' . implode(', ', $missing), 501, 'x0'), ini_parse_quantity(ini_get('upload_max_filesize')) < Initial::T_SIZE => throw new Alert('PHP: upload_max_filesize is too small', 501, 'x0'), ini_parse_quantity(ini_get('post_max_size')) < Initial::T_SIZE => throw new Alert('PHP: post_max_size is too small', 501, 'x0'), default => true};
-	}
+	private function checkEnvironment(): void {match (true) {version_compare(PHP_VERSION, '8.2.0', '<') => throw new Alert('PHP: unsupported version', 501, 'x0'), !empty($missing = array_filter(['ctype', 'curl', 'hash', 'json', 'mbstring', 'openssl', 'pcre', 'pdo_sqlite'], fn($ext) => !extension_loaded($ext))) => throw new Alert('PHP: ' . implode(', ', $missing), 501, 'x0'), ini_parse_quantity(ini_get('upload_max_filesize')) < Initial::T_SIZE => throw new Alert('PHP: upload_max_filesize is too small', 501, 'x0'), ini_parse_quantity(ini_get('post_max_size')) < Initial::T_SIZE => throw new Alert('PHP: post_max_size is too small', 501, 'x0'), default => true};}
 	private function getClient(): void {
 		if (($state = $this->getState())->secret === null) return;
 		($token = $this->request->getPost('unbolt')) !== null && MFAService::verifyCode($state->secret, (string)$token, 18, 6, $state->alphabet ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5'), $state->offset ?? throw new Alert('Unbolt offset not configured', 500, 'x5'), 'sha256') || throw new Alert('Authentication required', 401, 'a7');
@@ -420,7 +416,10 @@ final class Application {
 	private function handleUpdate(): void {
 		['raw' => $rawPayload, 'decoded' => $payload] = $this->getPayload('update');
 		$state = $this->getState();
-		if (empty($payload['p'])) exit($this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($state->zipped ? '1' : '0') . (!$this->isFirst() ? '1' : '0')));
+		if (empty($payload['p'])) {
+			$this->sendResponse((((!ctype_digit((string)($payload['i'] ?? ''))) && password_verify((string)($payload['i'] ?? ''), Initial::O_NAME)) ? 'b' : 'a') . ':' . ($state->zipped ? '1' : '0') . (!$this->isFirst() ? '1' : '0'));
+			exit();
+		}
 		$serial = $this->authenticateMachine($rawPayload, $payload);
 		if ($serial !== null) error_log(Initial::T_NAME . ' | 🔓 | Recovery mode activated');
 		$user = $this->authenticateRequest($payload);
@@ -462,14 +461,15 @@ final class Application {
 		$userLine = hash('sha256', $passwordHash);
 		$userKey = hash_hkdf('sha256', (string)$userName . "\0" . (string)$userCode, 32, '', (string)$clientHash);
 		if ($totpCode && strlen($totpCode) > 6) return $this->codesService->validateToken($totpCode, $userID, $userLine, $passwordHash, $userKey) ? ['token' => $this->codesService->createToken($userID, $userLine, $passwordHash, $userKey)] : $this->handleFailure($userLine, $userID, $totpCode);
-		$mfaSecret = MFAService::generateSecret($passwordHash . "\0" . $clientHash, MFAService::ABC);
+		$mfaSecret = MFAService::generateSecret($passwordHash . "\0" . $clientHash . "\0" . ($this->getState()->serial ?? ''), MFAService::ABC);
 		return match ([$this->codesService->isReady($userLine), $totpCode && strlen($totpCode) === 6 && ctype_digit($totpCode) && MFAService::verifyCode($mfaSecret, $totpCode, 6, 30, MFAService::ABC, 0)]) {[false, false] => ['o' => 'otpauth://totp/' . Initial::T_NAME . ":{$userID}?secret=" . $mfaSecret . "&issuer=" . Initial::T_NAME], [true, false] => $this->handleFailure($userLine, $userID, $totpCode), default => ['token' => $this->codesService->createToken($userID, $userLine, $passwordHash, $userKey)]};
 	}
 	private function sendResponse(string|array $data, int $httpCode = 200, ?Throwable $e = null): void {
 		$e && error_log(Initial::T_NAME . ' | ' . (($data === 'q2') ? '🔒' : (($httpCode >= 500) ? '⛔' : '🚫')) . ' | ' . $e->getMessage() . " ({$data}) | " . $this->request->address);
 		http_response_code($httpCode);
 		header('Content-Type: application/json; charset=UTF-8');
-		($key = $this->getKey()) && header('X-Signature:' . base64_encode(hash_hmac('sha256', $response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES), $key, true)));
+		$response = json_encode((is_string($data) ? ['r' => $data] : $data) + ['w' => time()], JSON_UNESCAPED_SLASHES);
+		if ($key = $this->getKey()) header('X-Signature:' . base64_encode(hash_hmac('sha256', $response, $key, true)));
 		echo $response;
 		$e && exit();
 	}
