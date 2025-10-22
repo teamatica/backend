@@ -156,7 +156,7 @@ class LangsService {
 	}
 	private function fetchFile(string ...$filenames): array {
 		return empty($filenames) ? [] : array_reduce($filenames, function($results, $filename) {
-			if ($curl = curl_init(Initial::S_BASE . $filename)) {
+			if ($curl = curl_init(Initial::S_BASE . basename($filename))) {
 				curl_setopt_array($curl, [CURLOPT_BUFFERSIZE => 8192, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_ENCODING => '', CURLOPT_FAILONERROR => false, CURLOPT_FOLLOWLOCATION => false, CURLOPT_FORBID_REUSE => true, CURLOPT_FRESH_CONNECT => true, CURLOPT_MAXFILESIZE => 32768, CURLOPT_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_REDIR_PROTOCOLS => CURLPROTO_HTTPS, CURLOPT_RETURNTRANSFER => true, CURLOPT_SSL_VERIFYHOST => 2, CURLOPT_SSL_VERIFYPEER => true, CURLOPT_TIMEOUT => 5, CURLOPT_USERAGENT => Initial::T_NAME]);
 				$content = curl_exec($curl);
 				$results[$filename] = (curl_getinfo($curl, CURLINFO_HTTP_CODE) === 200 && $content !== false) ? $content : (!error_log(Initial::T_NAME . ' | ❗ | Not found: ' . Initial::S_BASE . $filename) ? null : null);
@@ -401,7 +401,7 @@ final class Application {
 		if (!password_verify((string)($payload['p'] ?? ''), $passwordHash) || ($isOperator && !password_verify((string)($payload['i'] ?? ''), Initial::O_NAME))) throw new Alert("ID #{$userID}: authentication failed", 401, 'a1');
 		return ['userID' => $userID, 'isOperator' => $isOperator, 'passwordHash' => $passwordHash];
 	}
-	private function checkEnvironment(): void {match (true) {version_compare(PHP_VERSION, '8.2.0', '<') => throw new Alert('PHP: unsupported version', 501, 'x0'), !empty($missing = array_filter(['ctype', 'curl', 'hash', 'json', 'mbstring', 'openssl', 'pcre', 'pdo_sqlite'], fn($ext) => !extension_loaded($ext))) => throw new Alert('PHP: ' . implode(', ', $missing), 501, 'x0'), ini_parse_quantity(ini_get('upload_max_filesize')) < Initial::T_SIZE => throw new Alert('PHP: upload_max_filesize is too small', 501, 'x0'), ini_parse_quantity(ini_get('post_max_size')) < Initial::T_SIZE => throw new Alert('PHP: post_max_size is too small', 501, 'x0'), default => true};}
+	private function checkEnvironment(): void {match (true) {version_compare(PHP_VERSION, '8.2.0', '<') => throw new Alert('PHP: unsupported version', 501, 'x0'), PHP_INT_SIZE < 8 => throw new Alert('PHP: 32-bit version', 501, 'x0'), !is_writable(__DIR__) => throw new Alert('PHP: directory is not writable', 501, 'x0'), (fileperms(__DIR__) & 0777) !== 0711 => !error_log(sprintf(Initial::T_NAME . ' | ⚠️ | Recommended directory permissions: 0711 (rwx --x --x) instead of %04o', fileperms(__DIR__) & 0777)) || true, !empty($missing = array_filter(['ctype', 'curl', 'hash', 'json', 'mbstring', 'openssl', 'pcre', 'pdo_sqlite'], fn($ext) => !extension_loaded($ext))) => throw new Alert('PHP: ' . implode(', ', $missing), 501, 'x0'), ini_parse_quantity(ini_get('upload_max_filesize')) < Initial::T_SIZE => throw new Alert('PHP: upload_max_filesize is too small', 501, 'x0'), ini_parse_quantity(ini_get('post_max_size')) < Initial::T_SIZE => throw new Alert('PHP: post_max_size is too small', 501, 'x0'), default => true};}
 	private function getClient(): void {
 		if (($state = $this->getState())->secret === null) return;
 		($token = $this->request->getPost('unbolt')) !== null && MFAService::verifyCode($state->secret, (string)$token, 18, 6, $state->alphabet ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5'), $state->offset ?? throw new Alert('Unbolt offset not configured', 500, 'x5'), 'sha256') || throw new Alert('Authentication required', 401, 'a7');
