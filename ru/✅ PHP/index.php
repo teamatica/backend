@@ -45,12 +45,12 @@ final class Manager {
 			unlink($realPath);
 			return;
 		}
-		$files = iterator_to_array(new RecursiveIteratorIterator(new RecursiveDirectoryIterator($realPath, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST));
-		array_walk($files, function($fileinfo) use ($sandboxPath) {
+		$iterator = new RecursiveIteratorIterator(new RecursiveDirectoryIterator($realPath, RecursiveDirectoryIterator::SKIP_DOTS), RecursiveIteratorIterator::CHILD_FIRST);
+		foreach ($iterator as $fileinfo) {
 			$itemPath = $fileinfo->getRealPath();
 			if ($itemPath === false || !str_starts_with($itemPath, $sandboxPath . DIRECTORY_SEPARATOR)) throw new \RuntimeException('Path traversal attempt at: ' . $fileinfo->getPathname());
 			$fileinfo->isDir() ? rmdir($itemPath) : unlink($itemPath);
-		});
+		}
 		rmdir($realPath);
 	}
 }
@@ -401,7 +401,7 @@ final class Application {
 		if (!password_verify((string)($payload['p'] ?? ''), $passwordHash) || ($isOperator && !password_verify((string)($payload['i'] ?? ''), Initial::O_NAME))) throw new Alert("ID #{$userID}: authentication failed", 401, 'a1');
 		return ['userID' => $userID, 'isOperator' => $isOperator, 'passwordHash' => $passwordHash];
 	}
-	private function checkEnvironment(): void {match (true) {version_compare(PHP_VERSION, '8.2.0', '<') => throw new Alert('PHP: unsupported version', 501, 'x0'), PHP_INT_SIZE < 8 => throw new Alert('PHP: 32-bit version', 501, 'x0'), !is_writable(__DIR__) => throw new Alert('PHP: directory is not writable', 501, 'x0'), (fileperms(__DIR__) & 0777) !== 0711 => !error_log(sprintf(Initial::T_NAME . ' | ⚠️ | Recommended directory permissions: 0711 (rwx --x --x) instead of %04o', fileperms(__DIR__) & 0777)) || true, !empty($missing = array_filter(['ctype', 'curl', 'hash', 'json', 'mbstring', 'openssl', 'pcre', 'pdo_sqlite'], fn($ext) => !extension_loaded($ext))) => throw new Alert('PHP: ' . implode(', ', $missing), 501, 'x0'), ini_parse_quantity(ini_get('upload_max_filesize')) < Initial::T_SIZE => throw new Alert('PHP: upload_max_filesize is too small', 501, 'x0'), ini_parse_quantity(ini_get('post_max_size')) < Initial::T_SIZE => throw new Alert('PHP: post_max_size is too small', 501, 'x0'), default => true};}
+	private function checkEnvironment(): void {match (true) {version_compare(PHP_VERSION, '8.2.0', '<') => throw new Alert('PHP: unsupported version', 501, 'x0'), PHP_INT_SIZE < 8 => throw new Alert('PHP: 32-bit version', 501, 'x0'), !is_writable(__DIR__) => throw new Alert('PHP: directory is not writable', 501, 'x0'), (fileperms(__DIR__) & 0777) !== 0711 => !error_log(sprintf(Initial::T_NAME . ' | ⚠️ | Recommended directory permissions: 0711 (rwx --x --x) instead of %04o', fileperms(__DIR__) & 0777)) || true, !empty($missing = array_filter(['ctype', 'curl', 'hash', 'json', 'mbstring', 'openssl', 'pcre', 'pdo_sqlite'], fn($ext) => !extension_loaded($ext))) => throw new Alert('PHP: ' . implode(', ', $missing), 501, 'x0'), !empty($disabled = array_filter(['curl_init', 'hash_hmac', 'openssl_encrypt'], fn($fn) => !function_exists($fn))) => throw new Alert('PHP: ' . implode(', ', $disabled), 501, 'x0'), ini_parse_quantity(ini_get('memory_limit')) < (Initial::T_SIZE * 2) => throw new Alert('PHP: memory_limit is too small', 501, 'x0'), ini_parse_quantity(ini_get('post_max_size')) < Initial::T_SIZE => throw new Alert('PHP: post_max_size is too small', 501, 'x0'), ini_parse_quantity(ini_get('upload_max_filesize')) < Initial::T_SIZE => throw new Alert('PHP: upload_max_filesize is too small', 501, 'x0'), default => true};}
 	private function getClient(): void {
 		if (($state = $this->getState())->secret === null) return;
 		($token = $this->request->getPost('unbolt')) !== null && MFAService::verifyCode($state->secret, (string)$token, 18, 6, $state->alphabet ?? throw new Alert('Unbolt alphabet not configured', 500, 'x5'), $state->offset ?? throw new Alert('Unbolt offset not configured', 500, 'x5'), 'sha256') || throw new Alert('Authentication required', 401, 'a7');
