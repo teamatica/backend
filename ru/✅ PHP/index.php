@@ -390,7 +390,7 @@ final class Application {
 		} catch (Alert $e) {
 			if ($e->errorCode !== 'a7' || !(isset($payload['i']) && !ctype_digit((string)$payload['i']))) throw $e;
 			$state = $this->getState();
-			$serial = self::getSerial();
+			$serial = self::getSelfie();
 			if ($state->serial !== null && $serial !== null && $state->serial !== $serial) return $serial;
 			throw $e;
 		}
@@ -450,7 +450,7 @@ final class Application {
 		}
 		if ($serial !== null) error_log(Initial::T_NAME . ' | 🔓 | Recovery mode activated');
 		if ($newToken) error_log(Initial::T_NAME . " | 🔐 | ID #{$user['userID']}: token renewed | " . $this->request->address);
-		$this->utilsService->processUpload($this->request, $payload['l'], (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o'], $serial ?? self::getSerial());
+		$this->utilsService->processUpload($this->request, $payload['l'], (string)$payload['v'], (string)$payload['s'], (string)$payload['a'], (int)$payload['o'], $serial ?? self::getSelfie());
 		error_log(Initial::T_NAME . " | ☑️ | ID #{$user['userID']}: upload received | " . $this->request->address);
 		$this->sendResponse('a', 201);
 		if (function_exists('fastcgi_finish_request')) fastcgi_finish_request();
@@ -484,7 +484,7 @@ final class Application {
 		($key = $this->getKey()) !== null || $this->isFirst() || throw new Alert('Cannot generate signature key', 500, 's1');
 		hash_equals(hash_hmac('sha256', $rawPayload, $key, true), base64_decode($clientSignature ?? throw new Alert('Signature is missing', 400, 's2'), true) ?: throw new Alert('Invalid signature format', 400, 's3')) || throw new Alert('Invalid signature', 401, 's4');
 	}
-	private static function getSerial(): ?string {
+	private static function getSelfie(): ?string {
 		if (!($ch = curl_init('%%%%%'))) return null;
 		curl_setopt_array($ch, [CURLOPT_CERTINFO => true, CURLOPT_CONNECTTIMEOUT => 5, CURLOPT_NOBODY => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 5]);
 		curl_exec($ch);
